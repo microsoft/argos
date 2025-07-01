@@ -37,4 +37,4 @@ toml==0.10.2
 tqdm==4.66.4
 typing_extensions==4.12.2
 tzdata==2024.1
-urllib3==2.2.2
+urllib3==2.5.0
