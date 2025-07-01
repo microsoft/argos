@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "1:00"
+    open-pull-requests-limit: 0
+    allow:
+      - dependency-type: "direct"
+    labels:
+      - "dependencies"
+      - "python"
