@@ -4,7 +4,7 @@ updates:
     directory: "/"
     schedule:
       interval: "cron"
-      cron: "30 1 * * 1"
+      cronjob: "30 1 * * 1"
     open-pull-requests-limit: 0
     allow:
       - dependency-type: "direct"
