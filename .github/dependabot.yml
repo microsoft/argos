@@ -3,9 +3,8 @@ updates:
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "1:00"
+      interval: "cron"
+      cron: "30 1 * * 1"
     open-pull-requests-limit: 0
     allow:
       - dependency-type: "direct"
