@@ -26,7 +26,7 @@ We do not recommend using Argos in commercial or real-world applications without
 - Argos was not designed or evaluated for all possible downstream purposes. Developers should consider its inherent limitations as they select use cases,
 and evaluate and mitigate for accuracy, safety, and fairness concerns specific to each intended downstream use.
 - Argos should not be used in highly regulated domains where inaccurate outputs could suggest actions that lead to injury or negatively impact an individual's legal, financial, or life opportunities.
-We do not recommend using Argos in the context of high-risk decision making (e.g.， in law enforcement, legal, finance, or healthcare).
+We do not recommend using Argos in the context of high-risk decision making (e.g., in law enforcement, legal, finance, or healthcare).
 
 
 Setup and Installation
@@ -162,7 +162,7 @@ Evaluation
 Argos was evaluated on its ability to detect time-series anomalies accurately in collected anomaly detection datasets.
 A detailed discussion of our evaluation methods and results can be found in [Argos paper][paper link].
 
-### Evaluatoin Methods
+### Evaluation Methods
 
 We used event-based F1 score with point adjustment to measure Argos's performance.
 
@@ -174,7 +174,7 @@ For more on these specific models, please see https://azure.microsoft.com/en-us/
 
 Results may vary if Argos is used with a different model, based on their unique design, configuration and training.
 
-### Evaluatoin Results
+### Evaluation Results
 
 At a high level, we found that Argos outperformed state-of-the-art methods, increasing F1 scores by up to __28.3%__.
 
