@@ -1,5 +1,5 @@
-Argos
-=====
+Argos: Agentic Time-Series Anomaly Detection with Autonomous Rule Generation via LLMs
+=====================================================================================
 
 Overview
 --------
