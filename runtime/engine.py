@@ -46,6 +46,7 @@ class Engine(ABC):
         sample_per_prompt=1,
         parallel_core=DEFAULT_PARRALLEL_CORE,
         rule_per_group=3,
+        max_iter=None,
     ):
         self.chunk_size = chunk_size
         self.image_chunk_size = image_chunk_size
@@ -73,7 +74,8 @@ class Engine(ABC):
         self.model_res_path = model_res_path
 
         self.cur_iter = 0
-        self.max_iter = MAX_ITER
+        self.max_iter = max_iter if max_iter is not None else MAX_ITER
+        self.max_iter_override = max_iter
 
         # in the unit of minute
         self.max_time = timeout * 60
@@ -227,6 +229,7 @@ class Engine(ABC):
         # save from the current rule_path to the temp_res_path
         # temp_res_path = rule_file_path.replace(".py", "_temp.py")
         # os.system(f"cp {rule_file_path} {temp_res_path}")
+        eval_res = None
         while time.time() - start_time < self.max_time:
             try:
                 eval_res, _, _ = self.review_agent.run(rule_file_path, last_rule_path)
@@ -263,7 +266,7 @@ class Engine(ABC):
                 train_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
             # Evaluate on validation set for rule selection
             try:
-                val_eval_res, _, _ = self.review_agent.eval_val(rule_file_path)
+                val_eval_res, _, _ = self.review_agent.eval_val(rule_file_path, output_full_res=True)
             except Exception as e:
                 val_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
         else:
@@ -282,7 +285,8 @@ class Engine(ABC):
         self.cur_iter = 0
         start_time = time.time()
 
-        self.max_iter = 50
+        if self.max_iter_override is None:
+            self.max_iter = 50
         mapping_last_rule_path = {i: None for i in range(self.parallel_core)}
         rule_perf_pairs = []
         
@@ -467,7 +471,7 @@ class Engine(ABC):
             if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
                 train_eval_res, _, _ = self.review_agent.combined_eval(self.get_rule_path(top_k_curr=id), "train")
             else:
-                train_eval_res, _, _ = self.review_agent.eval(self.get_rule_path(top_k_curr=id), self.dataset.get_train_df())
+                train_eval_res, _, _ = self.review_agent.eval(self.get_rule_path(top_k_curr=id), self.dataset.get_train_df(), output_full_res=True)
         elif self.dataset_mode == "all-in-one":
             if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
                 train_eval_res, _, _ = self.review_agent.combined_eval_all_in_one(self.get_rule_path(top_k_curr=id), eval_mode="train")
@@ -483,7 +487,7 @@ class Engine(ABC):
 
         # Evaluate on validation set for rule selection
         try:
-            val_eval_res, _, _ = self.review_agent.eval_val(self.get_rule_path(top_k_curr=id))
+            val_eval_res, _, _ = self.review_agent.eval_val(self.get_rule_path(top_k_curr=id), output_full_res=True)
         except Exception:
             val_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
         final_val_res_path = self.get_rule_path(top_k_curr=id).replace(".py", "_eval_res_val.json")
@@ -718,6 +722,7 @@ class Engine(ABC):
                         train_eval_res, _, _ = self.review_agent.eval(
                             self.get_rule_path(top_k_curr=top_k_curr),
                             self.dataset.get_train_df(),
+                            output_full_res=True,
                         )
                 elif self.dataset_mode == "all-in-one":
                     if (
@@ -746,7 +751,7 @@ class Engine(ABC):
                 # Evaluate on validation set for rule selection
                 try:
                     val_eval_res, _, _ = self.review_agent.eval_val(
-                        self.get_rule_path(top_k_curr=top_k_curr)
+                        self.get_rule_path(top_k_curr=top_k_curr), output_full_res=True
                     )
                 except Exception:
                     val_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}

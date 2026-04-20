@@ -25,7 +25,7 @@ class PointF1(EvalInterface):
             recall: corresponding recall value;
         """
         prec, recall, _ = sklearn.metrics.precision_recall_curve(
-            y_true=labels, probas_pred=scores
+            y_true=labels, y_score=scores
         )
 
         f1_all = (2 * prec * recall) / (prec + recall)

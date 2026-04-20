@@ -47,6 +47,7 @@ def main(args):
     sample_per_prompt = args.sample_per_prompt
     p_cores = args.p_cores
     rule_per_group = args.rule_per_group
+    max_iter = args.max_iter
 
     if repeat > 1:
         assert (
@@ -102,6 +103,7 @@ def main(args):
                 sample_per_prompt=sample_per_prompt,
                 parallel_core=p_cores,
                 rule_per_group=rule_per_group,
+                max_iter=max_iter,
             )
 
         logging.info(f"args: {args}")
@@ -255,6 +257,12 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="The number of rules to select per iteration for evolution training mode. Default is 1.",
+    )
+    parser.add_argument(
+        "--max_iter",
+        type=int,
+        default=None,
+        help="Cap the number of training iterations. If unset, uses the mode's default.",
     )
     args = parser.parse_args()
     main(args)

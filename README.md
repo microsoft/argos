@@ -111,14 +111,20 @@ argos
 Getting Started
 ---------------
 
-Argos comes with two modes: with or without Aggregator.
-If you are using Argos without Aggregator, that means Argos will rely solely on LLM agents to train anomaly rules on the full training dataset.
+Argos relies on LLM agents to train anomaly rules on the training dataset.
+You can run Argos through the driver program (`driver.py`) provided.
 
-For either case, you can run Argos through a driver program (`driver.py`) provided.
+### Modes
 
-### Argos w/o Aggregator
+`driver.py` exposes three training modes via `--mode`:
 
-For example, if you would like to train anomaly rules without Aggregator, using a chunk size of 2500 for each data chunk in the training iteration, with one-for-one dataset mode and top-5 rule selection, run the following command:
+- `train-LLM-only` — sequentially train `--top_k` rules per iteration with a single LLM agent pipeline (DetectionAgent → RepairAgent → ReviewAgent).
+- `train-LLM-only-parallel` — same pipeline as `train-LLM-only`, but trains the `--top_k` rules concurrently across threads to speed up each iteration.
+- `train-evolution` — evolutionary training with `--p_cores` parallel pipelines; every other iteration the top `--rule_per_group` rules are mutated (change, free, remove, remove-all-but-one) by the MutateAgent and carried into the next iteration.
+
+### Examples
+
+Train anomaly rules with the basic single-pipeline mode, chunk size 2500, one-for-one dataset mode, top-5 rule selection:
 
 ```sh
 python3 driver.py \
@@ -130,30 +136,32 @@ python3 driver.py \
   --dataset_mode="one-by-one"
 ```
 
-This will produce a list of rules for each training iteration along with training and testing performance in the `$result_path` folder.
-
-### Argos w/ Aggregator
-
-If you would like to proceed with Argos w/ Aggregator, that means you have an existing anomaly detection model.
-
-First, you need to collect incorrect examples from the existing model and arrange them in a folder following the steps described here (TODO).
-
-The training with Aggregator comes with two passes, one for training a set of rules to fix false positives and one for training a set of rules to fix false negatives.
-
-For example, if you would like to train anomaly rules to fix false positives with Aggregator, using a chunk size of 100, with one-for-one dataset mode and top-1 rule selection, run the following command:
+Train with the parallel pipeline mode:
 
 ```sh
 python3 driver.py \
   --dataset_path=$dataset_path \
-  --mode=train-combined-fp \
+  --mode=train-LLM-only-parallel \
   --result_path=$result_path \
-  --chunk_size=1000 \
-  --top_k=1 \
-  --dataset_mode="one-by-one" \
-  --model_res_path=$model_res_path
+  --chunk_size=2500 \
+  --top_k=5 \
+  --dataset_mode="one-by-one"
 ```
 
-Note that you need to additionally supply the processed model result path from your existing model in the argument.
+Train with the evolutionary mode (6 parallel pipelines, select top 2 rules per iteration for mutation):
+
+```sh
+python3 driver.py \
+  --dataset_path=$dataset_path \
+  --mode=train-evolution \
+  --result_path=$result_path \
+  --chunk_size=2500 \
+  --p_cores=6 \
+  --rule_per_group=2 \
+  --dataset_mode="one-by-one"
+```
+
+Each training run produces the generated rule files, per-iteration evaluation results on train/validation/test splits, and a log under `$result_path`.
 
 
 Evaluation

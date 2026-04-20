@@ -371,13 +371,17 @@ class ReviewAgent(Agent):
 
         return self.eval_test(curr_rule_path, output_full_res=True)
         
-    def eval_val(self, curr_rule_path):
+    def eval_val(self, curr_rule_path, output_full_res=False):
         """Evaluate the rule on the validation set."""
         if self.dataset.get_dataset_mode() == "one-by-one":
             if self.mode == "train-combined-fp" or self.mode == "train-combined-fn":
                 return self.combined_eval(curr_rule_path, "train")
             else:
-                return self.eval(curr_rule_path, self.dataset.get_val_df())
+                return self.eval(
+                    curr_rule_path,
+                    self.dataset.get_val_df(),
+                    output_full_res=output_full_res,
+                )
         elif self.dataset.get_dataset_mode() == "all-in-one":
             if self.mode == "train-combined-fp" or self.mode == "train-combined-fn":
                 return self.combined_eval_all_in_one(curr_rule_path, "train")
