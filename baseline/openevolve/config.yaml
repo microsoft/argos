@@ -1,0 +1,69 @@
+# Evolution settings
+max_iterations: 500
+checkpoint_interval: 10
+parallel_evaluations: 1
+
+# LLM configuration
+llm:
+  api_base: "YOUR_API_BASE"  # Or your LLM provider
+  models:
+    - name: "gpt-4o"
+  temperature: 0.7
+  timeout: 120
+
+# # Database configuration (MAP-Elites algorithm)
+# database:
+#   population_size: 50
+#   num_islands: 3
+#   migration_interval: 10
+#   feature_dimensions:  # MUST be a list, not an integer
+#     - "score"
+#     - "complexity"
+
+# Evaluation settings
+evaluator:
+  timeout: 60
+  max_retries: 3
+  cascade_evaluation: false
+
+# Prompt configuration
+prompt:
+  system_message: |
+    You are an AI assistant that helps people write rules to determine whether the pattern of time series data is abnormal (negative) or not (positive). The time series data is collected during a task for AIOps. Each data segment contains {self.chunk_size} continuous samples, and each sample is a tuple of (value, label, index), label indicates the current value is abnormal (label=1), or normal (label=0). You task is to write specific rules to describe and remember the given abnormal (negative) or normal (positive) samples, you should describe the pattern of each sample, including but not limited to average, trend (e.g., whether increase/decrease for at least 4 continous numbers), existence of regression (e.g., last 4 continuous numbers all 20% lower than mean), etc. Note that the sample is time series so the order of numbers inside each sample is also important. 
+
+    You should achieve the task in the following steps:
+    1. You will be given the data sample in following format:
+    ##### DATA
+    <multiple known data samples, each sample contains {self.chunk_size} continuous samples, each sample is a tuple of (value, label, index)>
+
+
+    2. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (X, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. Notice that X does not need to be {self.chunk_size}. You should return the labels as an np.ndarray of shape (X), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. 
+
+    ##### CODE
+    ```python
+    # import necessary libraries for your code
+    def inference(sample: np.ndarray) -> np.ndarray:
+        # Put anomaly types you received in the comment, IMPORTANT: You should directly copy the anomaly types given to you and do not modify it
+        ##### Anomaly Types BEGIN #####
+        # Anomaly Type 1: Description of anomaly type 1
+        # Anomaly Type 2: Description of anomaly type 2
+        ##### Anomaly Types END #####
+        # Your comment to describe how normal data behave
+        # Normal Rule 1
+        # Normal Rule 2
+        # Your code to detect if the given sample is abnormal
+        # Abnormal Rule 1: which anomaly type this rule is addressing or reasoning if it is not covered by the anomaly types
+        if ...
+        # Abnormal Rule 2: which anomaly type this rule is addressing or reasoning if it is not covered by the anomaly types
+        if ...
+        # return labels as a 1d numpy array indicating abnormal/normal of each index
+    ```
+  num_top_programs: 3
+  num_diverse_programs: 2
+  # Include evaluator artifacts (e.g., train samples) in prompts,
+  # but cap their size to avoid exceeding the context window.
+  include_artifacts: true
+  # max_artifact_bytes: 8192
+
+# Logging
+log_level: "INFO"

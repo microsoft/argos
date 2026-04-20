@@ -16,11 +16,13 @@ class ArgosDataset(ABC):
         chunk_size=1000,
         image_chunk_size=None,
         train_test_split=0.7,
+        val_split=0.2,
         model_res_path=None,
     ) -> None:
         """
         Args:
             dataset_path (str): The path to the dataset.
+            val_split (float): Fraction of training data to reserve as validation set (default 0.2).
         """
         super().__init__()
         self.dataset_path = dataset_path
@@ -29,6 +31,7 @@ class ArgosDataset(ABC):
         self.chunk_size = chunk_size
         self.image_chunk_size = image_chunk_size
         self.train_test_split = train_test_split
+        self.val_split = val_split
         self.model_res_path = model_res_path
         self.preprocess()
 
@@ -46,13 +49,14 @@ class ArgosDataset(ABC):
             # for every value, chunk to 3 digits after the decimal point
             # df["value"] = df["value"].apply(lambda x: round(x, 3))
 
-            self.train_df = df[: int(len(df) * self.train_test_split)]
+            full_train_df = df[: int(len(df) * self.train_test_split)]
 
-            # also consider validation portion
-            # split_index = int(len(self.train_df) * 0.2)
-            # self.train_df = self.train_df[:-split_index]
+            # Split training data into train (80%) and validation (20%)
+            val_split_index = int(len(full_train_df) * (1 - self.val_split))
+            self.train_df = full_train_df[:val_split_index]
+            self.val_df = full_train_df[val_split_index:]
 
-            self.whole_train_df = self.train_df.copy()
+            self.whole_train_df = full_train_df.copy()
 
             self.test_df = df[int(len(df) * self.train_test_split) :]
 
@@ -82,6 +86,7 @@ class ArgosDataset(ABC):
                 )
 
             self.train_dict = self.split_df_by_chunk(self.train_df, self.chunk_size)
+            self.val_dict = self.split_df_by_chunk(self.val_df, self.chunk_size)
             self.test_dict = self.split_df_by_chunk(self.test_df, self.chunk_size)
             if self.image_chunk_size:
                 self.train_dict_image = self.split_df_by_chunk(
@@ -104,9 +109,12 @@ class ArgosDataset(ABC):
                     continue
                 df = pd.read_csv(os.path.join(self.dataset_path, dataset_file))
                 dataset_name = dataset_file.split(".")[0]
-                train_df = df[: int(len(df) * self.train_test_split)]
+                full_train_df = df[: int(len(df) * self.train_test_split)]
+                val_split_index = int(len(full_train_df) * (1 - self.val_split))
+                train_df = full_train_df[:val_split_index]
+                val_df = full_train_df[val_split_index:]
                 test_df = df[int(len(df) * self.train_test_split) :]
-                dataset_dict[dataset_name] = (train_df, test_df)
+                dataset_dict[dataset_name] = (train_df, test_df, val_df)
             self.dataset_dict = dataset_dict
             # Optional: derive abnormal and normal dict
             if (
@@ -122,7 +130,7 @@ class ArgosDataset(ABC):
 
                 self.model_train_label_dict = {}
                 self.model_test_label_dict = {}
-                for dataset_name, (train_df, test_df) in dataset_dict.items():
+                for dataset_name, (train_df, test_df, val_df) in dataset_dict.items():
                     self.model_test_label_dict[dataset_name] = (
                         self.load_model_test_labels(dataset_name)
                     )
@@ -151,21 +159,22 @@ class ArgosDataset(ABC):
                 # derive new train_df from each dataset
                 new_dataset_dict = {}
                 self.skip_training = True
-                for dataset_name, (train_df, test_df) in dataset_dict.items():
+                for dataset_name, (train_df, test_df, val_df) in dataset_dict.items():
                     train_df, skip_training = self.derive_train_df_from_indices(
                         train_df, dataset_name
                     )
                     if not skip_training:
-                        new_dataset_dict[dataset_name] = (train_df, test_df)
+                        new_dataset_dict[dataset_name] = (train_df, test_df, val_df)
                     self.skip_training = self.skip_training and skip_training
                 dataset_dict = new_dataset_dict
 
             # Step 2: split the train_df into chunks
             train_list = []
+            val_list = []
             test_list = []
             if self.image_chunk_size:
                 train_list_image = []
-            for dataset_name, (train_df, test_df) in dataset_dict.items():
+            for dataset_name, (train_df, test_df, val_df) in dataset_dict.items():
                 train_dict = self.split_df_by_chunk(train_df, self.chunk_size)
                 test_dict = self.split_df_by_chunk(test_df, self.chunk_size)
 
@@ -180,8 +189,11 @@ class ArgosDataset(ABC):
                             chunk["label"].sum() == 0
                         ), "There should be no anomaly in the train_df"
 
+                val_dict_cur = self.split_df_by_chunk(val_df, self.chunk_size)
+
                 # append the values to the list
                 train_list.extend(list(train_dict.values()))
+                val_list.extend(list(val_dict_cur.values()))
                 test_list.extend(list(test_dict.values()))
                 if self.image_chunk_size:
                     train_dict_image = self.split_df_by_chunk(
@@ -190,6 +202,7 @@ class ArgosDataset(ABC):
                     train_list_image.extend(list(train_dict_image.values()))
             # for each list, assign index to each chunk and create dict
             self.train_dict = {i: train_list[i] for i in range(len(train_list))}
+            self.val_dict = {i: val_list[i] for i in range(len(val_list))}
             self.test_dict = {i: test_list[i] for i in range(len(test_list))}
             if self.image_chunk_size:
                 self.train_dict_image = {
@@ -291,8 +304,6 @@ class ArgosDataset(ABC):
         Returns:
             train_df (pd.DataFrame): The new train_df with only the incorrect indices chunks kept.
         """
-        # Yile: this is only for combined mode, and currently only for KPI dataset
-        # curve_name = None
 
         train_df = train_df.copy()
 
@@ -511,6 +522,15 @@ class ArgosDataset(ABC):
             self.dataset_mode == "one-by-one"
         ), "This method is only for one-by-one dataset"
         return self.whole_train_df
+
+    def get_val_df(self):
+        assert (
+            self.dataset_mode == "one-by-one"
+        ), "This method is only for one-by-one dataset"
+        return self.val_df
+
+    def get_val_dict(self):
+        return self.val_dict
 
     def get_train_dict(self):
         return self.train_dict

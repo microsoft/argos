@@ -55,8 +55,6 @@ def inference(sample: np.ndarray) -> np.ndarray:
         if "label" in curr_df.columns:
             curr_df.drop(columns=["label"], inplace=True)
 
-        start_time = time.time()
-
         while self.get_elapsed_time() < self.max_time:
 
             error_message = None
@@ -67,14 +65,16 @@ def inference(sample: np.ndarray) -> np.ndarray:
 
             # print(inference(current_data.values).shape)
             try:
-                exec(rule, globals())
+                local_env = {}
+                exec(rule, local_env)
                 # execute_and_cleanup(rule)
-                labels = run_with_timeout(inference, TIMEOUT_INFERENCE, curr_df.values)
+                inference_fn = local_env["inference"]
+                labels = run_with_timeout(inference_fn, TIMEOUT_INFERENCE, curr_df.values)
                 # labels = inference(curr_df.values)
-                cleanup_global_env()
+                # cleanup_global_env()
                 format_check(curr_df, curr_rule_path, labels)
             except Exception as e:
-                cleanup_global_env()
+                # cleanup_global_env()
                 error_message = str(e)
 
             if not error_message:
@@ -95,7 +95,10 @@ def inference(sample: np.ndarray) -> np.ndarray:
                 + error_message
             )
 
-            ans = self.LLM.query(final_query)
+            try:
+                ans = self.LLM.query(final_query)
+            except TimeoutError as e:
+                continue
             self.LLM.reset()
 
             # if inference not in answer, then we assume it fails to generate code, and directly retry

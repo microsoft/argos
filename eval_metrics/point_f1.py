@@ -1,26 +1,36 @@
-from sklearn.metrics import precision_recall_curve
+from typing import Type
+
 import numpy as np
-import json
+import sklearn.metrics
 
-def calculate_point_f1(scores: np.ndarray, labels: np.ndarray):
-    precision, recall, thresholds = precision_recall_curve(labels, scores)
+from eval_metrics.base import EvalInterface, MetricInterface
+from eval_metrics.metrics import F1Class
 
-    # Compute F1 scores for all thresholds
-    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)  # Avoid division by zero
 
-    # Find the threshold that maximizes the F1 score
-    best_idx = np.nanargmax(f1_scores)  # Ignore NaNs
-    best_f1 = f1_scores[best_idx]
-    best_precision = precision[best_idx]
-    best_recall = recall[best_idx]
-    best_threshold = thresholds[best_idx]
+class PointF1(EvalInterface):
+    """
+    Using Traditional F1 score to evaluate the models.
+    """
 
-    # Return results in JSON format
-    result = {
-        "f1": best_f1,
-        "precision": best_precision,
-        "recall": best_recall,
-        "threshold": float(best_threshold)
-    }
-    
-    return result
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "point-wise f1"
+
+    def calc(self, scores, labels, margins) -> type[MetricInterface]:
+        """
+        Returns:
+         A F1class (Evaluations.Metrics.F1class), including:\n
+            best_f1: the value of best f1 score;\n
+            precision: corresponding precision value;\n
+            recall: corresponding recall value;
+        """
+        prec, recall, _ = sklearn.metrics.precision_recall_curve(
+            y_true=labels, probas_pred=scores
+        )
+
+        f1_all = (2 * prec * recall) / (prec + recall)
+        max_idx = np.argmax(f1_all)
+
+        return F1Class(
+            name=self.name, p=prec[max_idx], r=recall[max_idx], f1=f1_all[max_idx]
+        )

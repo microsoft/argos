@@ -14,6 +14,9 @@ from sklearn.ensemble import IsolationForest
 from sklearn.metrics import classification_report, confusion_matrix
 
 from agent.agent import LLM, TIMEOUT, Agent
+from eval_metrics.event_f1pa import EventF1PA
+from eval_metrics.point_f1 import PointF1
+from eval_metrics.point_f1pa import PointF1PA
 
 
 class DetectionAgent(Agent):
@@ -420,8 +423,6 @@ def inference(sample: np.ndarray) -> np.ndarray:
         # ground-truth: 0 0 1 1 0
         # precision - abnormal
 
-        # read code into str
-        # with open("/home/yilegu/Anomaly-Detection/DetectionAgent/generated_rules/2024-07-10_14-11-34/rule.py", "r") as f:
         with open(rule_file, "r") as f:
             rule = f.read()
         # logging.info(f"Start to evaluate the rule on train dataset")
@@ -455,6 +456,15 @@ def inference(sample: np.ndarray) -> np.ndarray:
             eval_df["label"], labels, labels=[0, 1], zero_division=0
         )
         logging.info(report)
+        eval_interface = PointF1()
+        eval_res = eval_interface.calc(labels, eval_df["label"].values, None)
+        logging.info(eval_res.to_dict())
+        eval_interface = PointF1PA()
+        eval_res = eval_interface.calc(labels, eval_df["label"].values, None)
+        logging.info(eval_res.to_dict())
+        eval_interface = EventF1PA(mode="squeeze")
+        eval_res = eval_interface.calc(labels, eval_df["label"].values, None)
+        logging.info(eval_res.to_dict())
         self.visualize(eval_df[["value", "label", "index"]].values, labels)
 
     def visualize(self, test_data, labels):
@@ -682,7 +692,7 @@ def inference(sample: np.ndarray) -> np.ndarray:
     5. Each iteration you will be able to see the code you wrote in the last iteration, and you should modify the code to reduce the number of false positives.
     6. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your code for only once, don't use them for any other purpose.
     7. You must only output the python function you write, and you must not output any other information.
-
+    8. Be sure to annotate any abnormal rules in the code using the comment # Abnormal Rule n, where n follows the file format's numbering convention.
             """.strip()
             # 6. You should make sure the python code is correct and can be executed without any error.
             #     7. If your code uses any external libraries, you should include the import statements in the code.

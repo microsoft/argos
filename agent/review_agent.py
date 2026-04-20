@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 
 import numpy as np
@@ -19,8 +20,11 @@ from common.common import (calculate_performance, cleanup_global_env,
 from common.exception import (RuntimeException, SyntaxException,
                               TimeoutException)
 from datasets.dataset import ArgosDataset
-from eval_metrics.point_f1 import calculate_point_f1
+from eval_metrics.event_f1pa import EventF1PA
+from eval_metrics.point_f1 import PointF1
+from eval_metrics.point_f1pa import PointF1PA
 
+EVOLUTION_THESHOLD = 0.10
 
 class ReviewAgent(Agent):
     def __init__(
@@ -35,6 +39,7 @@ class ReviewAgent(Agent):
     ) -> None:
         if (
             mode == "train-LLM-only"
+            or mode == "train-LLM-only-parallel"
             or mode == "train-LLM-only-image"
             or mode == "ablation-detection-only"
             or mode == "eval-LLM-only"
@@ -70,6 +75,47 @@ class ReviewAgent(Agent):
     f1_score (diff with performance from previous code),precision (diff with performance from previous code),recall (diff with performance from previous code)
     4. IMPORTANT: You should output the fixed code following the same format as the input code and as a Python function with name `inference`. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your fixed code for only once, don't use them for any other purpose.
 
+            """.strip()
+        elif mode == "train-evolution":
+            review_agent_prompt = f"""You are an AI assistant that reviews Python code changes and proposes modifications to maintain or improve performance. You will be provided with:  
+
+1. **The current Python code** – a function named `inference(sample: np.ndarray) -> np.ndarray` that classifies data as normal (0) or abnormal (1) based on predefined rules. The function analyzes input samples shaped `(x, 2)`, where each row contains `(value, index)`, and applies pattern-matching logic to determine abnormal patterns. The outline of the code is as follows:
+##### CODE
+    ```python
+    # import necessary libraries
+    def inference(sample: np.ndarray) -> np.ndarray:
+        # Comment to describe how normal data behave
+        # Normal Rule 1
+        # Normal Rule 2
+        # Code to detect if the given sample is abnormal
+        # Abnormal Rule 1
+        if ...
+        # Abnormal Rule 2
+        if ...
+        # return labels as a 1d numpy array indicating abnormal/normal of each index
+    ```
+2. **A code difference (diff)** – highlighting modifications between the previous and current versions of `inference`.  Given in the following format:
+##### CODE DIFFERENCE
+    start_prev,end_prev,operation,start_curr,end_curr
+    < Lines from the previous code snippet
+    ---
+    > Lines from the current code snippet
+    ...
+3. **Performance metrics** – showing the `f1_score`, `precision`, and `recall` of the current code compared to the previous version, along with the differences in these metrics.  
+4. IMPORTANT: You should output the fixed code following the same format as the input code and as a Python function with name `inference`. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your fixed code for only once, don't use them for any other purpose.
+
+### **Your Goal:**
+- Ensure that the performance metrics of the current code will increase after implemeting suggested modification.  
+- If there is a regression in any metric, propose modifications **based on the current code and the provided code difference**.  
+- **Do not revert the code under any circumstance.** Instead, modify the current version to match or exceed the previous performance while preserving meaningful improvements.  
+
+### **Instructions:**  
+1. Analyze the current `inference` function and identify any issues in rule logic that may have caused performance regression.  
+2. Examine the code difference and understand how recent changes impacted the classification behavior.  
+3. Suggest modifications that refine the current rules to restore or enhance performance while preserving meaningful improvements.  
+4. If necessary, adjust conditions, thresholds, or patterns in the abnormal/normal rule logic to balance precision and recall.  
+5. **Output only the modified `inference` function in Python syntax, wrapped in triple backticks (```python ... ```), ensuring correct formatting.** Do not provide explanations or additional text.
+6. Don't fully revert the code to the previous version; instead, propose targeted modifications to improve performance (you can still revert specific changes if needed).
             """.strip()
         elif mode == "train-combined-fp" or mode == "train-combined-fn":
             review_agent_prompt = f"""
@@ -133,6 +179,8 @@ class ReviewAgent(Agent):
         self.mode = mode
         self.model_res_path = model_res_path
         self.max_time = timeout * 60
+        self.consecutive_val_decreases = 0
+        self.best_val_f1 = 0.0
         print(
             f"[ReviewAgent] Initialized with chunk_size={chunk_size}, mode={mode}, llm_engine={llm_engine}, timeout={timeout}"
         )
@@ -147,7 +195,7 @@ class ReviewAgent(Agent):
             # curr_validate_res, _ = self.eval(curr_rule_path, self.train_df)
             # last_validate_res, _ = self.eval(last_rule_path, self.train_df)
             if self.dataset.get_dataset_mode() == "one-by-one":
-                if self.mode == "train-LLM-only" or self.mode == "train-LLM-only-image":
+                if self.mode == "train-LLM-only" or self.mode == "train-LLM-only-image" or self.mode=="train-evolution" or self.mode=="train-LLM-only-parallel":
                     curr_validate_res, _, _ = self.eval(
                         curr_rule_path, self.dataset.get_train_df()
                     )
@@ -173,10 +221,9 @@ class ReviewAgent(Agent):
 
             final_res_path = curr_rule_path.replace(".py", "_eval_res_train.json")
             with open(final_res_path, "w") as f:
-                print(curr_validate_res)
                 json.dump(curr_validate_res, f)
             if not last_rule_path:
-                if self.mode == "train-LLM-only" or self.mode == "train-LLM-only-image":
+                if self.mode == "train-LLM-only" or self.mode == "train-LLM-only-image" or self.mode=="train-evolution" or self.mode=="train-LLM-only-parallel":
                     break
                 if self.dataset.get_dataset_mode() == "one-by-one":
                     last_validate_res, _ = self.get_baseline_performance("train")
@@ -189,6 +236,8 @@ class ReviewAgent(Agent):
                     if (
                         self.mode == "train-LLM-only"
                         or self.mode == "train-LLM-only-image"
+                        or self.mode == "train-evolution"
+                        or self.mode == "train-LLM-only-parallel"
                     ):
                         last_validate_res, _, _ = self.eval(
                             last_rule_path, self.dataset.get_train_df()
@@ -223,9 +272,14 @@ class ReviewAgent(Agent):
                 if key != "f1":
                     continue
                 # TODO: maybe performance staying the same is also a form of regression
-                if curr_validate_res[key] < last_validate_res[key]:
-                    has_regression = True
-                    break
+                if self.mode == "train-evolution":
+                    if curr_validate_res[key] < last_validate_res[key] - EVOLUTION_THESHOLD:
+                        has_regression = True
+                        break
+                else:
+                    if curr_validate_res[key] < last_validate_res[key]:
+                        has_regression = True
+                        break
 
             if not has_regression:
                 logging.info(
@@ -252,6 +306,25 @@ class ReviewAgent(Agent):
                 if key == "rule_path" or key == "threshold":
                     continue
                 final_query += f"{key}: {curr_validate_res[key]} ({curr_validate_res[key] - last_validate_res[key]}),"
+
+            # Collect regression samples where previous rule was correct but current rule is wrong
+            if last_rule_path:
+                if self.dataset.get_dataset_mode() == "one-by-one":
+                    regression_text = self.collect_regression_samples(
+                        curr_rule_path, last_rule_path, self.dataset.get_train_df()
+                    )
+                elif self.dataset.get_dataset_mode() == "all-in-one":
+                    # For all-in-one, collect from the first few train chunks
+                    train_dict = self.dataset.get_train_dict()
+                    import pandas as pd
+                    sample_dfs = [train_dict[k] for k in list(train_dict.keys())[:5]]
+                    sample_df = pd.concat(sample_dfs) if sample_dfs else None
+                    regression_text = self.collect_regression_samples(
+                        curr_rule_path, last_rule_path, sample_df
+                    ) if sample_df is not None else ""
+                else:
+                    regression_text = ""
+                final_query += regression_text
 
             logging.info(
                 f"[ReviewAgent] The code has performance regression, start to propose modifications: {final_query}"
@@ -293,14 +366,126 @@ class ReviewAgent(Agent):
             logging.info(
                 f"[ReviewAgent] Time out to review the code in {curr_rule_path}"
             )
+            
             raise TimeoutException()
 
+        return self.eval_test(curr_rule_path, output_full_res=True)
+        
+    def eval_val(self, curr_rule_path):
+        """Evaluate the rule on the validation set."""
+        if self.dataset.get_dataset_mode() == "one-by-one":
+            if self.mode == "train-combined-fp" or self.mode == "train-combined-fn":
+                return self.combined_eval(curr_rule_path, "train")
+            else:
+                return self.eval(curr_rule_path, self.dataset.get_val_df())
+        elif self.dataset.get_dataset_mode() == "all-in-one":
+            if self.mode == "train-combined-fp" or self.mode == "train-combined-fn":
+                return self.combined_eval_all_in_one(curr_rule_path, "train")
+            else:
+                val_dict = self.dataset.get_val_dict()
+                return self.eval_all_in_one(curr_rule_path, val_dict)
+        else:
+            raise ValueError(
+                f"Unsupported dataset mode: {self.dataset.get_dataset_mode()}"
+            )
+
+    def check_overfitting(self, val_f1, max_consecutive_decreases=3):
+        """Check if the model is overfitting based on validation F1 score.
+
+        Returns True if validation F1 has decreased for N consecutive iterations,
+        indicating overfitting and that training should be early-stopped.
+        """
+        if val_f1 < self.best_val_f1:
+            self.consecutive_val_decreases += 1
+        else:
+            self.consecutive_val_decreases = 0
+            self.best_val_f1 = val_f1
+
+        is_overfitting = self.consecutive_val_decreases >= max_consecutive_decreases
+        if is_overfitting:
+            logging.info(
+                f"[ReviewAgent] Overfitting detected: validation F1 decreased for "
+                f"{self.consecutive_val_decreases} consecutive iterations "
+                f"(best={self.best_val_f1:.4f}, current={val_f1:.4f})"
+            )
+        return is_overfitting
+
+    def collect_regression_samples(self, curr_rule_path, last_rule_path, eval_df, max_samples=3):
+        """Collect training samples where the previous rule labeled correctly
+        but the new rule labels incorrectly (regression samples).
+
+        Returns a formatted string describing the regression samples for the LLM prompt.
+        """
+        if last_rule_path is None:
+            return ""
+
+        try:
+            _, curr_labels, _ = self.eval(curr_rule_path, eval_df, log=False)
+            _, last_labels, _ = self.eval(last_rule_path, eval_df, log=False)
+        except Exception:
+            return ""
+
+        gt_labels = eval_df["label"].values
+
+        # Find indices where prev was correct but curr is wrong
+        prev_correct = (last_labels == gt_labels)
+        curr_wrong = (curr_labels != gt_labels)
+        regression_mask = prev_correct & curr_wrong
+
+        regression_indices = np.where(regression_mask)[0]
+        if len(regression_indices) == 0:
+            return ""
+
+        # Collect up to max_samples regression windows (chunk around each regression point)
+        sample_text = "\n##### REGRESSION SAMPLES\n"
+        sample_text += (
+            "The following are training samples where the previous rule labeled correctly "
+            "but the current rule labels incorrectly. Use these to understand what the "
+            "current rule got wrong and fix the regression.\n"
+        )
+
+        window_size = min(20, self.chunk_size)
+        shown = 0
+        shown_ranges = []
+
+        for idx in regression_indices:
+            if shown >= max_samples:
+                break
+            # Skip if this index overlaps with an already-shown window
+            start = max(0, idx - window_size // 2)
+            end = min(len(eval_df), idx + window_size // 2)
+            if any(s <= idx <= e for s, e in shown_ranges):
+                continue
+
+            shown_ranges.append((start, end))
+            chunk = eval_df.iloc[start:end]
+
+            sample_text += f"\n--- Sample {shown + 1} (indices {start}-{end}) ---\n"
+            sample_text += f"Data values: {chunk['value'].values.tolist()}\n"
+            sample_text += f"Ground truth labels: {gt_labels[start:end].tolist()}\n"
+            sample_text += f"Previous rule labels: {last_labels[start:end].astype(int).tolist()}\n"
+            sample_text += f"Current rule labels:  {curr_labels[start:end].astype(int).tolist()}\n"
+
+            # Summarize the specific regression
+            fn_count = int(np.sum((curr_labels[start:end] == 0) & (gt_labels[start:end] == 1) & (last_labels[start:end] == 1)))
+            fp_count = int(np.sum((curr_labels[start:end] == 1) & (gt_labels[start:end] == 0) & (last_labels[start:end] == 0)))
+            if fn_count > 0:
+                sample_text += f"  -> {fn_count} false negatives introduced (missed anomalies that previous rule caught)\n"
+            if fp_count > 0:
+                sample_text += f"  -> {fp_count} false positives introduced (normal points wrongly flagged)\n"
+
+            shown += 1
+
+        sample_text += f"\nTotal regression points: {len(regression_indices)} out of {len(eval_df)} samples\n"
+        return sample_text
+
+    def eval_test(self, curr_rule_path, output_full_res=False):
         # TODO: shoud use train or test data to evaluate?
         if self.dataset.get_dataset_mode() == "one-by-one":
             if self.mode == "train-combined-fp" or self.mode == "train-combined-fn":
                 return self.combined_eval(curr_rule_path, "test")
             else:
-                return self.eval(curr_rule_path, self.dataset.get_test_df())
+                return self.eval(curr_rule_path, self.dataset.get_test_df(), output_full_res=output_full_res)
         elif self.dataset.get_dataset_mode() == "all-in-one":
             # TODO: support combined evaluation
             if self.mode == "train-combined-fp" or self.mode == "train-combined-fn":
@@ -314,7 +499,7 @@ class ReviewAgent(Agent):
             )
 
     # TODO: add eval metric info in the figure name
-    def eval(self, rule_file, eval_df, log=True):
+    def eval(self, rule_file, eval_df, log=True, output_full_res=False):
         """
         Evaluate the rule on the given dataset
 
@@ -324,12 +509,15 @@ class ReviewAgent(Agent):
         """
 
         with open(rule_file, "r") as f:
+            # BUGFIX: we must only create local env, but not global for parallel evaluation
             rule = f.read()
+            local_env = {}
             try:
-                exec(rule, globals())
+                exec(rule, local_env)
                 # execute_and_cleanup(rule)
+                inference_fn = local_env["inference"]
             except Exception as e:
-                cleanup_global_env()
+                # cleanup_global_env()
                 raise SyntaxException(str(e), rule_file)
 
         if log:
@@ -350,12 +538,12 @@ class ReviewAgent(Agent):
             # print(inference(current_data.values).shape)
             try:
                 raw_labels = run_with_timeout(
-                    inference, TIMEOUT_INFERENCE, current_data.values
+                    inference_fn, TIMEOUT_INFERENCE, current_data.values
                 )
                 # raw_labels = inference(current_data.values)
                 format_check(current_data, rule_file, raw_labels)
             except Exception as e:
-                cleanup_global_env()
+                # cleanup_global_env()
                 raise RuntimeException(str(e), current_data, rule_file)
             scores[start:end] = smooth_labels(raw_labels, window_size=3)
             # labels[start:end] = inference(current_data.values)
@@ -363,20 +551,23 @@ class ReviewAgent(Agent):
             # logging.info(f"[ReviewAgent] Number of anomalies in chunk {i}: {count}")
             # labels[start:end] = np.zeros(shape=(self.chunk_size))
         end_time = time.time()
-        print(f"[ReviewAgent] Inference time: {end_time - start_time}")
+        logging.info(f"[ReviewAgent] Inference time: {end_time - start_time}")
 
-        cleanup_global_env()
+        # cleanup_global_env()
 
         final_res_dict = self.eval_scores_by_metrics(
             scores, eval_df["label"].values, log
         )
         labels = np.zeros(shape=(len(eval_df),))
-        threshold = final_res_dict[
+        threshold = final_res_dict["event-based f1 under pa with mode squeeze"][
             "threshold"
         ]
         labels[scores >= threshold] = 1
+        
+        if output_full_res:
+            return final_res_dict, labels, scores
         return (
-            final_res_dict,
+            final_res_dict["event-based f1 under pa with mode squeeze"],
             labels,
             scores,
         )
@@ -393,12 +584,12 @@ class ReviewAgent(Agent):
         scores = np.concatenate(scores)
         final_res_dict = self.eval_scores_by_metrics(scores, gt_labels)
         labels = np.zeros(shape=(len(gt_labels),))
-        threshold = final_res_dict[
+        threshold = final_res_dict["event-based f1 under pa with mode squeeze"][
             "threshold"
         ]
         labels[scores >= threshold] = 1
         return (
-            final_res_dict,
+            final_res_dict["event-based f1 under pa with mode squeeze"],
             labels,
             scores,
         )
@@ -408,16 +599,27 @@ class ReviewAgent(Agent):
         report = classification_report(
             gt_labels, scores, labels=[0, 1], zero_division=0
         )
-        
-        eval_res_pf1 = calculate_point_f1(scores, gt_labels)
+        eval_interface = PointF1()
+        eval_res_pf1 = eval_interface.calc(scores, gt_labels, None)
+
+        eval_interface = PointF1PA()
+        eval_res_pf1pa = eval_interface.calc(scores, gt_labels, None)
+
+        eval_interface = EventF1PA(mode="squeeze")
+        eval_res_ef1pa = eval_interface.calc(scores, gt_labels, None)
 
         if log:
             logging.info(report)
-            logging.info(eval_res_pf1)
-        
+            logging.info(eval_res_pf1.to_dict())
+            logging.info(eval_res_pf1pa.to_dict())
+            logging.info(eval_res_ef1pa.to_dict())
 
         # combine 3 dicts in to a final_res_dict
-        final_res_dict = eval_res_pf1
+        final_res_dict = {
+            **eval_res_pf1.to_dict(),
+            **eval_res_pf1pa.to_dict(),
+            **eval_res_ef1pa.to_dict(),
+        }
         return final_res_dict
 
     def combined_eval(self, rule_file, eval_mode="train"):
@@ -468,7 +670,7 @@ class ReviewAgent(Agent):
         all_combined_labels = []
         all_model_labels = []
         all_rule_scores = []
-        for dataset_name, (train_df, test_df) in dataset_dict.items():
+        for dataset_name, (train_df, test_df, *_rest) in dataset_dict.items():
             if eval_mode == "train":
                 model_labels = self.dataset.get_model_train_labels(dataset_name)
                 eval_df = train_df
@@ -492,7 +694,7 @@ class ReviewAgent(Agent):
         assert len(all_gt_labels) == len(all_model_labels) == len(all_rule_scores)
         final_res_dict = self.eval_scores_by_metrics(all_rule_scores, all_gt_labels)
         all_rule_labels = np.zeros(shape=(len(all_gt_labels),))
-        threshold = final_res_dict[
+        threshold = final_res_dict["event-based f1 under pa with mode squeeze"][
             "threshold"
         ]
         all_rule_labels[all_rule_scores >= threshold] = 1
@@ -518,7 +720,7 @@ class ReviewAgent(Agent):
         all_model_labels = []
         all_rule_scores_fp = []
         all_rule_scores_fn = []
-        for dataset_name, (train_df, test_df) in dataset_dict.items():
+        for dataset_name, (train_df, test_df, *_rest) in dataset_dict.items():
             if eval_mode == "train":
                 model_labels = self.dataset.get_model_train_labels(dataset_name)
                 eval_df = train_df
@@ -550,7 +752,7 @@ class ReviewAgent(Agent):
             final_res_dict = self.eval_scores_by_metrics(
                 all_rule_scores_fp, all_gt_labels
             )
-            threshold = final_res_dict[
+            threshold = final_res_dict["event-based f1 under pa with mode squeeze"][
                 "threshold"
             ]
             all_rule_labels_fp[all_rule_scores_fp >= threshold] = 1
@@ -563,7 +765,7 @@ class ReviewAgent(Agent):
             final_res_dict = self.eval_scores_by_metrics(
                 all_rule_scores_fn, all_gt_labels
             )
-            threshold = final_res_dict[
+            threshold = final_res_dict["event-based f1 under pa with mode squeeze"][
                 "threshold"
             ]
             all_rule_labels_fn[all_rule_scores_fn >= threshold] = 1
@@ -601,7 +803,7 @@ class ReviewAgent(Agent):
         dataset_dict = self.dataset.get_dataset_dict()
         all_gt_labels = []
         all_model_labels = []
-        for dataset_name, (train_df, test_df) in dataset_dict.items():
+        for dataset_name, (train_df, test_df, *_rest) in dataset_dict.items():
             if eval_mode == "train":
                 model_labels = self.dataset.get_model_train_labels(dataset_name)
                 eval_df = train_df

@@ -45,6 +45,8 @@ def main(args):
     llm_engine = args.llm_engine
     timeout = args.timeout
     sample_per_prompt = args.sample_per_prompt
+    p_cores = args.p_cores
+    rule_per_group = args.rule_per_group
 
     if repeat > 1:
         assert (
@@ -68,6 +70,7 @@ def main(args):
                 dataset_mode=dataset_mode,
                 train_test_split=train_test_split,
                 top_k=top_k,
+                rule_per_group=rule_per_group,
             )
         elif mode == "eval-combined":
             engine = Engine(
@@ -80,6 +83,7 @@ def main(args):
                 dataset_mode=dataset_mode,
                 train_test_split=train_test_split,
                 top_k=top_k,
+                rule_per_group=rule_per_group,
             )
         else:
             engine = Engine(
@@ -96,6 +100,8 @@ def main(args):
                 llm_engine=llm_engine,
                 timeout=timeout,
                 sample_per_prompt=sample_per_prompt,
+                parallel_core=p_cores,
+                rule_per_group=rule_per_group,
             )
 
         logging.info(f"args: {args}")
@@ -136,13 +142,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="/home/t-yilegu/AgentAD/datasets/KPI/segments/train_02e99bd4f6cfb33f_1493568000_1501475640.csv",
+        default="",
         help="The data file to load",
     )
     parser.add_argument(
         "--result_path",
         type=str,
-        default="/home/t-yilegu/AgentAD/generated_rules/debug",
+        default="",
         help="The path to save the generated rules",
     )
     parser.add_argument(
@@ -164,6 +170,8 @@ if __name__ == "__main__":
             "eval-combined",
             "baseline-LLMAD",
             "ablation-detection-only",
+            "train-evolution",
+            "train-LLM-only-parallel",
         ],
         help="The mode to run the engine",
     )
@@ -183,7 +191,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_res_path",
         type=str,
-        default="/home/t-yilegu/Results",
+        default="",
         help="The path for results from EasyTSAD's model output",
     )
     parser.add_argument(
@@ -220,7 +228,7 @@ if __name__ == "__main__":
         "--llm_engine",
         type=str,
         default="gpt-4-32k",
-        choices=["gpt-4-32k", "gpt-4o", "gpt-35-turbo-16k"],
+        choices=["gpt-4-32k", "gpt-4o", "gpt-35-turbo-16k", "meta-llama/Llama-3.1-8B-Instruct", "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"],
         help="The engine to use for LLM",
     )
     parser.add_argument(
@@ -234,6 +242,19 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="The number of samples per prompt",
+    )
+    parser.add_argument(
+        "--p_cores",
+        type=int,
+        default=5,
+        help="The number of pipieline cores for evolution training mode. Default is 5.",
+    )
+
+    parser.add_argument(
+        "--rule_per_group",
+        type=int,
+        default=1,
+        help="The number of rules to select per iteration for evolution training mode. Default is 1.",
     )
     args = parser.parse_args()
     main(args)

@@ -18,7 +18,9 @@ from common.common import (calculate_performance, combine_labels, format_check,
                            run_with_timeout, smooth_labels)
 from common.exception import (RuntimeException, SyntaxException,
                               TimeoutException)
-from eval_metrics.point_f1 import calculate_point_f1
+from eval_metrics.event_f1pa import EventF1PA
+from eval_metrics.point_f1 import PointF1
+from eval_metrics.point_f1pa import PointF1PA
 
 
 class LLMAD(Agent):
@@ -170,10 +172,32 @@ This step ensures that the detected points are not merely normal fluctuations or
             eval_df["label"], scores, labels=[0, 1], zero_division=0
         )
         logging.info(report)
-        
-        eval_res_pf1 = calculate_point_f1(scores, eval_df["label"].values)
-        logging.info(eval_res_pf1)
+        eval_interface = PointF1()
+        eval_res_pf1 = eval_interface.calc(scores, eval_df["label"].values, None)
+        logging.info(eval_res_pf1.to_dict())
 
-        final_res_dict = eval_res_pf1
+        # # count how many 1s in the labels
+        # count = np.count_nonzero(labels)
+        # logging.info(f"[ReviewAgent] Number of anomalies: {count}")
+        eval_interface = PointF1PA()
+        eval_res_pf1pa = eval_interface.calc(scores, eval_df["label"].values, None)
+        logging.info(eval_res_pf1pa.to_dict())
+        eval_interface = EventF1PA(mode="squeeze")
+        eval_res_ef1pa = eval_interface.calc(scores, eval_df["label"].values, None)
+        logging.info(eval_res_ef1pa.to_dict())
 
+        # combine 3 dicts in to a final_res_dict
+        final_res_dict = {
+            **eval_res_pf1.to_dict(),
+            **eval_res_pf1pa.to_dict(),
+            **eval_res_ef1pa.to_dict(),
+        }
+        # final_res_path = rule_file.replace(".py", "_eval_res.json")
+        # with open(final_res_path, "w") as f:
+        #     json.dump(final_res_dict, f)
+
+        # self.visualize(eval_df[["value", "label", "index"]].values, labels)
+        # labels = np.zeros(shape=(len(eval_df),))
+        # threshold = final_res_dict["event-based f1 under pa with mode squeeze"]["threshold"]
+        # labels[scores >= threshold] = 1
         return final_res_dict

@@ -15,6 +15,7 @@ import pandas as pd
 from agent.agent import MAX_ITER, TIMEOUT
 from agent.detection_agent import DetectionAgentV3
 from agent.image_agent import ImageAgent
+from agent.mutate_agent import MutateAgent
 from agent.repair_agent import RepairAgent
 from agent.review_agent import ReviewAgent
 from baseline.llmad import LLMAD
@@ -23,7 +24,9 @@ from common.exception import (RuntimeException, SyntaxException,
                               TimeoutException)
 from datasets.dataset import ArgosDataset
 from selector.train_perf_selector import TrainPerfSelector
+import threading
 
+DEFAULT_PARRALLEL_CORE = 2
 
 class Engine(ABC):
     def __init__(
@@ -41,6 +44,8 @@ class Engine(ABC):
         llm_engine="gpt-4o",
         timeout=150,
         sample_per_prompt=1,
+        parallel_core=DEFAULT_PARRALLEL_CORE,
+        rule_per_group=3,
     ):
         self.chunk_size = chunk_size
         self.image_chunk_size = image_chunk_size
@@ -53,6 +58,10 @@ class Engine(ABC):
         self.top_k = top_k
         self.llm_engine = llm_engine
         self.sample_per_prompt = sample_per_prompt
+        self.parallel_core = parallel_core
+        self.rule_per_group = rule_per_group
+        # for threading
+        self.lock = threading.Lock()
 
         # set random seed
         np.random.seed(8)
@@ -95,12 +104,18 @@ class Engine(ABC):
 
         if self.mode == "baseline-LLMAD":
             self.LLMAD = LLMAD(
-                chunk_size=self.chunk_size, mode=self.mode, llm_engine="gpt-4-32k"
+                chunk_size=self.chunk_size, mode=self.mode, llm_engine=self.llm_engine
             )
             return
 
         print(f"Using LLM engine: {llm_engine}")
 
+        if self.mode == "train-evolution":
+            timeout *= self.parallel_core
+        elif self.mode == "train-LLM-only-parallel":
+            timeout *= self.top_k
+
+    
         self.detection_agent = DetectionAgentV3(
             chunk_size=self.chunk_size,
             mode=self.mode,
@@ -109,7 +124,8 @@ class Engine(ABC):
         )
 
         self.repair_agent = RepairAgent(
-            chunk_size=self.chunk_size, llm_engine=self.llm_engine, timeout=timeout
+            chunk_size=self.chunk_size, llm_engine=self.llm_engine,
+            timeout=timeout
         )
         self.review_agent = ReviewAgent(
             chunk_size=self.chunk_size,
@@ -118,7 +134,13 @@ class Engine(ABC):
             model_res_path=self.model_res_path,
             mode=self.mode,
             llm_engine=self.llm_engine,
-            timeout=timeout,
+            timeout=timeout
+        )
+
+        self.mutate_agent = MutateAgent(
+            chunk_size=self.chunk_size, 
+            llm_engine=self.llm_engine, 
+            timeout=timeout
         )
 
         if self.mode == "train-LLM-only-image":
@@ -126,7 +148,355 @@ class Engine(ABC):
                 chunk_size=self.image_chunk_size, mode=self.mode, llm_engine="gpt-4o"
             )
 
+    def generate_mapping(self, dir_path: str):
+        files = []
+        for root, _, filenames in os.walk(dir_path):
+            for filename in filenames:
+                if "mutated" in filename:
+                    files.append(os.path.join(root, filename))
+        
+        mapping = {}
+        for file in files:
+            parts = file.split("_mutated_")
+            index = int(parts[1].split(".py")[0])
+            mapping[index] = file
+
+        return mapping
+
+
+    def run_mutate_eval_thread(self, 
+                               start_time,
+                               pipeline_id,
+                               best_rule_path,
+                               curr_dfs):
+        mutated_rule_path = best_rule_path.replace(".py", f"_mutated_{pipeline_id}.py")
+        self.repair_agent.run(curr_dfs[0], mutated_rule_path)
+        success = False
+        while time.time() - start_time < self.max_time:
+            try:
+                eval_res, labels, _ = self.review_agent.run(mutated_rule_path, best_rule_path)
+                success = True
+                break  # Exit loop on success
+            except Exception as e:
+                logging.info(f"[TrainingEngine]: ReviewAgent error: {e}. Attempting repair...")
+                if isinstance(e, (SyntaxException, RuntimeException)):
+                    self.repair_agent.run(e.df if hasattr(e, "df") else curr_dfs[0], e.rule_path)
+                elif isinstance(e, TimeoutException):
+                    logging.info("[TrainingEngine]: ReviewAgent timed out, skipping iteration.")
+                    success = False
+                    break   
+                else:
+                    raise e
+
+        if self.dataset_mode == "one-by-one":
+            train_eval_res, _, _ = self.review_agent.eval(mutated_rule_path, self.dataset.get_train_df())
+            test_eval_res, _, _ = self.review_agent.eval_test(mutated_rule_path)
+            # Evaluate on validation set for rule selection
+            try:
+                val_eval_res, _, _ = self.review_agent.eval_val(mutated_rule_path)
+            except Exception:
+                val_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
+        else:
+            raise ValueError(f"Invalid dataset mode {self.dataset_mode}")
+        final_train_res_path = mutated_rule_path.replace(".py", "_eval_res_train.json")
+        with open(final_train_res_path, "w") as f:
+            json.dump(train_eval_res, f)
+
+        final_val_res_path = mutated_rule_path.replace(".py", "_eval_res_val.json")
+        with open(final_val_res_path, "w") as f:
+            json.dump(val_eval_res, f)
+
+        final_test_res_path = mutated_rule_path.replace(".py", "_eval_res_test.json")
+        with open(final_test_res_path, "w") as f:
+            json.dump(test_eval_res, f)
+
+    def run_iteration_thread(
+        self, pipeline_id, start_time, curr_dfs, current_iteration_dir_path, rule_perf_pairs, last_rule_path_in=None
+    ):
+        last_rule_path = last_rule_path_in
+        
+        rule_file_path = os.path.join(current_iteration_dir_path, f"rule_{pipeline_id}_0.py")
+        
+        self.detection_agent.run(
+            curr_dfs=curr_dfs,
+            curr_rule_path=rule_file_path,
+            last_rule_path=last_rule_path,
+            image_path=None,
+        )
+        self.repair_agent.run(curr_dfs[0], rule_file_path)
+        # save from the current rule_path to the temp_res_path
+        # temp_res_path = rule_file_path.replace(".py", "_temp.py")
+        # os.system(f"cp {rule_file_path} {temp_res_path}")
+        while time.time() - start_time < self.max_time:
+            try:
+                eval_res, _, _ = self.review_agent.run(rule_file_path, last_rule_path)
+                break  # Exit loop on success
+            except Exception as e:
+                logging.info(f"[TrainingEngine]: ReviewAgent error: {e}. Attempting repair...")
+                if isinstance(e, (SyntaxException, RuntimeException)):
+                    self.repair_agent.run(e.df if hasattr(e, "df") else curr_dfs[0], e.rule_path)
+                elif isinstance(e, TimeoutException):
+                    logging.info("[TrainingEngine]: ReviewAgent timed out, skipping iteration.")            
+                    eval_res = None
+                    break
+                else:
+                    raise e  # Rethrow unknown exceptions
+
+        if eval_res is None:
+            # copy back the original rule
+            # os.system(f"cp {temp_res_path} {rule_file_path}")
+            os.system(f"cp {last_rule_path} {rule_file_path}")
+            try:
+                eval_res, _ , _ = self.review_agent.eval_test(rule_file_path, output_full_res=True)
+            except Exception as e:
+                eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
+            logging.info("ReviewAgent time out for rule", rule_file_path)
+        # os.remove(temp_res_path)
+        final_res_path = rule_file_path.replace(".py", "_eval_res_test.json")
+        last_rule_path = rule_file_path
+        with open(final_res_path, "w") as f:
+            json.dump(eval_res, f)
+        if self.dataset_mode == "one-by-one":
+            try:
+                train_eval_res, _, _ = self.review_agent.eval(rule_file_path, self.dataset.get_train_df(), output_full_res=True)
+            except Exception as e:
+                train_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
+            # Evaluate on validation set for rule selection
+            try:
+                val_eval_res, _, _ = self.review_agent.eval_val(rule_file_path)
+            except Exception as e:
+                val_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
+        else:
+            raise ValueError(f"Invalid dataset mode {self.dataset_mode}")
+        final_train_res_path = rule_file_path.replace(".py", "_eval_res_train.json")
+        with open(final_train_res_path, "w") as f:
+            json.dump(train_eval_res, f)
+        # Save validation results for rule selection
+        final_val_res_path = rule_file_path.replace(".py", "_eval_res_val.json")
+        with open(final_val_res_path, "w") as f:
+            json.dump(val_eval_res, f)
+        with self.lock:
+            rule_perf_pairs.append((rule_file_path, final_val_res_path))
+
+    def run_evolution_mode(self):
+        self.cur_iter = 0
+        start_time = time.time()
+
+        self.max_iter = 50
+        mapping_last_rule_path = {i: None for i in range(self.parallel_core)}
+        rule_perf_pairs = []
+        
+        for agent in [self.detection_agent, self.repair_agent, self.review_agent, self.mutate_agent]:
+                agent.set_start_time()
+
+        while self.cur_iter < self.max_iter and time.time() - start_time < self.max_time:
+            logging.info(f"[TrainingEngine]: === Rule Iteration {self.cur_iter} ===")
+
+            # Generate random datasets for sampling
+            curr_dfs = [self.dataset.get_train_df_by_iter(np.random.randint(0, 1000)) for _ in range(self.sample_per_prompt)]
+
+            iteration_rule_path = os.path.join(self.rule_path, f"iter_{self.cur_iter}")
+            if(self.cur_iter == 0):
+                os.makedirs(iteration_rule_path, exist_ok=True)
+
+            # Launch parallel threads
+            threads = []
+            for pipeline_id in range(self.parallel_core):
+                thread = threading.Thread(
+                    target=self.run_iteration_thread,
+                    args=(
+                        pipeline_id,
+                        start_time,
+                        curr_dfs,
+                        iteration_rule_path,
+                        rule_perf_pairs,
+                        mapping_last_rule_path[pipeline_id],
+                    ),
+                )
+                threads.append(thread)
+                thread.start()
+
+            # Wait for all threads to finish
+            for thread in threads:
+                thread.join()
+
+            # Select the best rule based on performance
+            topk_selector = TrainPerfSelector(rule_perf_pairs)
+            logging.info("Rule performance pairs: %s", rule_perf_pairs)
+            logging.info("prev_best_rule_path: %s", mapping_last_rule_path)
+            best_rules_path = topk_selector.select_k_top_rule(self.rule_per_group, mapping_last_rule_path)
+            rule_perf_pairs.clear()
+            # we do mutation between 2 iterations
+            if self.cur_iter % 2 == 1: 
+
+                # Mutate the best rule (-1 to keep the original rule)
+                # self.mutate_agent.run(best_rule_path, self.parallel_core - 1)
+                self.mutate_agent.run_with_top_pick(best_rules_path, self.parallel_core, True)
+                self.mutate_agent.populate_missing_mutated_item(best_rules_path, self.parallel_core)
+
+                # Prepare for the next iteration
+                mapping_last_rule_path = self.generate_mapping(iteration_rule_path)
+
+                # # evaluate the mutated rules
+                # threads = []
+                # for i in range(self.parallel_core):
+                #     mutate_rule_path = mapping_last_rule_path[i]
+                #     original_rule_path = mutate_rule_path.replace(f"_mutated_{i}.py",".py")
+                #     # mutated_rule_path = best_rule_path.replace(".py", f"_mutated_{i}.py")
+                #     thread = threading.Thread(
+                #         target=self.run_mutate_eval_thread,
+                #         args=(start_time, i, original_rule_path, curr_dfs),
+                #     )
+
+                #     threads.append(thread)
+                #     thread.start()
+
+                # for thread in threads:
+                #     thread.join()
+
+                next_iteration_rule_path = os.path.join(self.rule_path, f"iter_{self.cur_iter + 1}")
+                os.makedirs(next_iteration_rule_path, exist_ok=True)
+
+                # copy all the mutated rules to the next iteration
+                for i in range(self.parallel_core):
+                    mutated_rule_path = mapping_last_rule_path[i]
+                    # mutated_rule_path = best_rule_path.replace(".py", f"_mutated_{i}.py")
+                    # eval_res_path_test = mutated_rule_path.replace(".py", "_eval_res_test.json")
+                    # eval_res_path_train = mutated_rule_path.replace(".py", "_eval_res_train.json")
+                    base_name = f"rule_{i}_{0}.py"
+                    # base_name_eval_res_test = f"rule_{i}_{0}_eval_res_test.json"
+                    # base_name_eval_res_train = f"rule_{i}_{0}_eval_res_train.json"
+                    os.system(f"cp {mutated_rule_path} {os.path.join(next_iteration_rule_path, base_name)}")
+                    # os.system(f"cp {eval_res_path_test} {os.path.join(next_iteration_rule_path, base_name_eval_res_test)}")
+                    # os.system(f"cp {eval_res_path_train} {os.path.join(next_iteration_rule_path, base_name_eval_res_train)}")
+                    # rule_perf_pairs.append((os.path.join(next_iteration_rule_path, base_name), os.path.join(next_iteration_rule_path, base_name_eval_res_train)))
+                    mapping_last_rule_path[i] = os.path.join(next_iteration_rule_path, base_name)
+            else:
+                next_iteration_rule_path = os.path.join(self.rule_path, f"iter_{self.cur_iter + 1}")
+                os.makedirs(next_iteration_rule_path, exist_ok=True)
+                # this iteration there is no mutation, we just copy the top-k rules to new pipelines
+                for i in range(self.parallel_core):
+                    index = i % len(best_rules_path)
+                    rule_path = best_rules_path[index]
+                    # eval_res_path_test = rule_path.replace(".py", "_eval_res_test.json")
+                    # eval_res_path_train = rule_path.replace(".py", "_eval_res_train.json")
+                    base_name = f"rule_{i}_{0}.py"
+                    # base_name_eval_res_test = f"rule_{i}_{0}_eval_res_test.json"
+                    # base_name_eval_res_train = f"rule_{i}_{0}_eval_res_train.json"
+                    os.system(f"cp {rule_path} {os.path.join(next_iteration_rule_path, base_name)}")
+                    # os.system(f"cp {eval_res_path_test} {os.path.join(next_iteration_rule_path, base_name_eval_res_test)}")
+                    # os.system(f"cp {eval_res_path_train} {os.path.join(next_iteration_rule_path, base_name_eval_res_train)}")
+                    # rule_perf_pairs.append((os.path.join(next_iteration_rule_path, base_name), os.path.join(next_iteration_rule_path, base_name_eval_res_train)))
+                    mapping_last_rule_path[i] = os.path.join(next_iteration_rule_path, base_name)
+            
+            # copy original one
+            # base_name = f"rule_{self.parallel_core - 1}_{0}.py"
+            # base_name_eval_res_test = f"rule_{self.parallel_core - 1}_{0}_eval_res_test.json"
+            # base_name_eval_res_train = f"rule_{self.parallel_core - 1}_{0}_eval_res_train.json"
+            # os.system(f"cp {best_rule_path} {os.path.join(next_iteration_rule_path, base_name)}")
+            # os.system(f"cp {best_rule_path.replace('.py', '_eval_res_test.json')} {os.path.join(next_iteration_rule_path, base_name_eval_res_test)}")
+            # os.system(f"cp {best_rule_path.replace('.py', '_eval_res_train.json')} {os.path.join(next_iteration_rule_path, base_name_eval_res_train)}")
+            # rule_perf_pairs.append((os.path.join(next_iteration_rule_path, base_name), os.path.join(next_iteration_rule_path, base_name_eval_res_train)))
+            
+            logging.info(f"[TrainingEngine]: Best rule path at iteration {self.cur_iter}: {best_rules_path}")
+
+            # Check for overfitting using validation set on the best rule
+            try:
+                best_val_res, _, _ = self.review_agent.eval_val(best_rules_path[0])
+                val_f1 = best_val_res.get("f1", 0.0)
+                if self.review_agent.check_overfitting(val_f1):
+                    logging.info(
+                        f"[TrainingEngine]: Early stopping at iteration {self.cur_iter} "
+                        f"due to overfitting (validation F1 decreased for consecutive iterations)"
+                    )
+                    break
+            except Exception as e:
+                logging.info(f"[TrainingEngine]: Validation eval failed: {e}, continuing training")
+
+            for rule_path in best_rules_path:
+                with open(os.path.join(self.rule_path, "best_rule_path.txt"), "a", buffering=1) as f:
+                    f.write(rule_path + "\n")
+
+            self.cur_iter += 1
+
+        self.wrapup_run(start_time, None)
+
+    def run_normal_mode_thread(self, 
+                               id,
+                               start_time,
+                               curr_dfs,
+                               last_rule_path,
+                               rule_perf_pairs):
+        self.detection_agent.run(
+            curr_dfs=curr_dfs,
+            curr_rule_path=self.get_rule_path(top_k_curr=id),
+            last_rule_path=last_rule_path,
+            image_path=None
+        )
+
+        self.repair_agent.run(curr_dfs[0], self.get_rule_path(top_k_curr=id))
+
+        while time.time() - start_time < self.max_time:
+            try:
+                eval_res, labels, _ = self.review_agent.run(self.get_rule_path(top_k_curr=id), last_rule_path)
+                break  # Exit loop on success
+            except Exception as e:
+                logging.info(f"[TrainingEngine]: ReviewAgent error: {e}. Attempting repair...")
+
+                if isinstance(e, (SyntaxException, RuntimeException)):
+                    self.repair_agent.run(e.df if hasattr(e, "df") else curr_dfs[0], e.rule_path)
+                elif isinstance(e, TimeoutException):
+                    logging.info("[TrainingEngine]: ReviewAgent timed out, skipping iteration.")
+                    eval_res = None
+                    break
+                else:
+                    raise e
+                
+        final_res_path = self.get_rule_path(top_k_curr=id).replace(".py", "_eval_res_test.json")
+
+        if eval_res:
+            with open(final_res_path, "w") as f:
+                json.dump(eval_res, f)
+        else:
+            os.system(f"cp {last_rule_path} {self.get_rule_path(top_k_curr=id)}")
+            eval_res = self.review_agent.eval_test(self.get_rule_path(top_k_curr=id))
+            with open(final_res_path, "w") as f:
+                json.dump(eval_res, f)
+
+        if self.dataset_mode == "one-by-one":
+            if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
+                train_eval_res, _, _ = self.review_agent.combined_eval(self.get_rule_path(top_k_curr=id), "train")
+            else:
+                train_eval_res, _, _ = self.review_agent.eval(self.get_rule_path(top_k_curr=id), self.dataset.get_train_df())
+        elif self.dataset_mode == "all-in-one":
+            if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
+                train_eval_res, _, _ = self.review_agent.combined_eval_all_in_one(self.get_rule_path(top_k_curr=id), eval_mode="train")
+            else:
+                train_dict = self.dataset.get_train_dict()
+                train_eval_res, _, _ = self.review_agent.eval_all_in_one(self.get_rule_path(top_k_curr=id), train_dict)
+        else:
+            raise ValueError(f"Invalid dataset mode {self.dataset_mode}")
+        final_train_res_path = self.get_rule_path(top_k_curr=id).replace(".py", "_eval_res_train.json")
+
+        with open(final_train_res_path, "w") as f:
+            json.dump(train_eval_res, f)
+
+        # Evaluate on validation set for rule selection
+        try:
+            val_eval_res, _, _ = self.review_agent.eval_val(self.get_rule_path(top_k_curr=id))
+        except Exception:
+            val_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
+        final_val_res_path = self.get_rule_path(top_k_curr=id).replace(".py", "_eval_res_val.json")
+        with open(final_val_res_path, "w") as f:
+            json.dump(val_eval_res, f)
+
+        with self.lock:
+            rule_perf_pairs.append((self.get_rule_path(top_k_curr=id), final_val_res_path))
+
     def run(self):
+        if self.mode == "train-evolution":
+            self.run_evolution_mode()
+            return
         if self.mode == "baseline-LLMAD":
             self.run_baseline()
             return
@@ -190,7 +560,7 @@ class Engine(ABC):
         # Step 2: rule training
 
         self.cur_iter = 0
-        last_rule_path = None
+        last_rule_paths = [None for _ in range(self.top_k)]
 
         start_time = time.time()
 
@@ -220,7 +590,7 @@ class Engine(ABC):
                 curr_dfs.append(curr_df)
 
             rule_perf_pairs = []
-
+            threads = []
             for top_k_curr in range(self.top_k):
                 if self.mode == "train-combined-fn":
                     # if self.normal_df is not None:
@@ -242,7 +612,7 @@ class Engine(ABC):
                     self.detection_agent.run(
                         curr_dfs,
                         self.get_rule_path(top_k_curr=top_k_curr),
-                        last_rule_path,
+                        last_rule_paths[top_k_curr],
                         normal_dfs,
                     )
                 elif self.mode == "train-combined-fp":
@@ -267,16 +637,30 @@ class Engine(ABC):
                     self.detection_agent.run(
                         curr_dfs,
                         self.get_rule_path(top_k_curr=top_k_curr),
-                        last_rule_path,
+                        last_rule_paths[top_k_curr],
                         abnormal_dfs,
                     )
                 elif self.mode == "train-LLM-only-image":
                     self.detection_agent.run(
                         curr_dfs=curr_dfs[0],
                         curr_rule_path=self.get_rule_path(top_k_curr=top_k_curr),
-                        last_rule_path=last_rule_path,
+                        last_rule_path=last_rule_paths[top_k_curr],
                         anomaly_types=final_anomaly_types,
                     )
+                elif self.mode == "train-LLM-only-parallel":
+                    thread = threading.Thread(
+                    target=self.run_normal_mode_thread,
+                    args=(
+                        top_k_curr,
+                        start_time,
+                        curr_dfs,
+                        last_rule_paths[top_k_curr],
+                        rule_perf_pairs,
+                    ),
+                    )
+                    threads.append(thread)
+                    thread.start()
+                    continue
                 else:
                     # training_figure_path = os.path.join(self.rule_path, f"training_figure_{self.cur_iter}.png")
                     # labels = np.zeros(len(curr_df))
@@ -284,16 +668,17 @@ class Engine(ABC):
                     self.detection_agent.run(
                         curr_dfs=curr_dfs,
                         curr_rule_path=self.get_rule_path(top_k_curr=top_k_curr),
-                        last_rule_path=last_rule_path,
+                        last_rule_path=last_rule_paths[top_k_curr],
                         image_path=None,
                     )
+                print("Detection done HOHOHOHOHO")
                 self.repair_agent.run(
                     curr_dfs[0], self.get_rule_path(top_k_curr=top_k_curr)
                 )
                 while True and time.time() - start_time < self.max_time:
                     try:
                         eval_res, labels, _ = self.review_agent.run(
-                            self.get_rule_path(top_k_curr=top_k_curr), last_rule_path
+                            self.get_rule_path(top_k_curr=top_k_curr), last_rule_paths[top_k_curr]
                         )
                         break
                     except Exception as e:
@@ -320,7 +705,7 @@ class Engine(ABC):
                 with open(final_res_path, "w") as f:
                     json.dump(eval_res, f)
 
-                # Also get train_df performance, we will use it for rule selector
+                # Also get train_df performance
                 if self.dataset_mode == "one-by-one":
                     if (
                         self.mode == "train-combined-fn"
@@ -358,9 +743,27 @@ class Engine(ABC):
                 with open(final_train_res_path, "w") as f:
                     json.dump(train_eval_res, f)
 
+                # Evaluate on validation set for rule selection
+                try:
+                    val_eval_res, _, _ = self.review_agent.eval_val(
+                        self.get_rule_path(top_k_curr=top_k_curr)
+                    )
+                except Exception:
+                    val_eval_res = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "threshold": 0.0}
+                final_val_res_path = self.get_rule_path(
+                    top_k_curr=top_k_curr
+                ).replace(".py", "_eval_res_val.json")
+                with open(final_val_res_path, "w") as f:
+                    json.dump(val_eval_res, f)
+
+                # Use validation performance for rule selection
                 rule_perf_pairs.append(
-                    (self.get_rule_path(top_k_curr=top_k_curr), final_train_res_path)
+                    (self.get_rule_path(top_k_curr=top_k_curr), final_val_res_path)
                 )
+
+            if self.mode == "train-LLM-only-parallel":
+                for thread in threads:
+                    thread.join()
 
             if skip:
                 logging.info(
@@ -369,77 +772,100 @@ class Engine(ABC):
                 continue
 
             topk_selector = TrainPerfSelector(rule_perf_pairs)
-            best_rule_path = topk_selector.select()
+            best_rule_paths = topk_selector.select_k_top_rule(self.rule_per_group)
+            rule_perf_pairs.clear()
 
             logging.info(
-                f"[TrainingEngine]: Best rule path at iteration {self.cur_iter}: {best_rule_path}"
+                f"[TrainingEngine]: Best rule path at iteration {self.cur_iter}: {best_rule_paths}"
             )
 
-            if self.dataset.get_dataset_mode() == "one-by-one":
-                if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
-                    eval_res, labels, _ = self.review_agent.combined_eval(
-                        best_rule_path, eval_mode="test"
+            # Check for overfitting using validation set on the best rule
+            try:
+                best_val_res, _, _ = self.review_agent.eval_val(best_rule_paths[0])
+                val_f1 = best_val_res.get("f1", 0.0)
+                if self.review_agent.check_overfitting(val_f1):
+                    logging.info(
+                        f"[TrainingEngine]: Early stopping at iteration {self.cur_iter} "
+                        f"due to overfitting (validation F1 decreased for consecutive iterations)"
                     )
-                else:
-                    eval_res, labels, _ = self.review_agent.eval(
-                        best_rule_path, self.dataset.get_test_df()
-                    )
+                    break
+            except Exception as e:
+                logging.info(f"[TrainingEngine]: Validation eval failed: {e}, continuing training")
 
-                prefix = best_rule_path.split("/")[-1].split(".")[0]
-                figure_path = os.path.join(self.rule_path, f"eval_figure_{prefix}.png")
-                self.visualize(
-                    self.dataset.get_test_df()[["value", "label", "index"]].values,
-                    labels,
-                    figure_path,
-                )
-            elif self.dataset.get_dataset_mode() == "all-in-one":
-                # TODO: implement combine eval for all-in-one mode
+            for rule_path in best_rule_paths:
+                with open(os.path.join(self.rule_path, "best_rule_path.txt"), "a", buffering=1) as f:
+                    f.write(rule_path + "\n")
 
-                prefix = best_rule_path.split("/")[-1].split(".")[0]
-                figure_path = os.path.join(self.rule_path, f"eval_figure_{prefix}.png")
-                if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
-                    eval_res, labels, _ = self.review_agent.combined_eval_all_in_one(
-                        best_rule_path, eval_mode="test"
-                    )
-                    dataset_dict = self.dataset.get_dataset_dict()
-                    test_df = []
-                    for _, (_, df) in dataset_dict.items():
-                        test_df.append(df)
-                    test_df = pd.concat(test_df)
-                else:
-                    test_dict = self.dataset.get_test_dict()
-                    eval_res, labels, _ = self.review_agent.eval_all_in_one(
-                        best_rule_path, test_dict
-                    )
+            last_rule_paths = []
+            # do a round-robin mapping
+            for i in range(self.top_k):
+                last_rule_paths.append(best_rule_paths[i % len(best_rule_paths)])
 
-                    # create test_df from test_dict by concatenating all the dataframes
-                    test_df = []
-                    for k, df in test_dict.items():
-                        test_df.append(df)
-                    test_df = pd.concat(test_df)
-                # remove index column
-                test_df = test_df.drop(columns=["index"])
-                # re-add index column
-                test_df["index"] = np.arange(len(test_df))
-                self.visualize(
-                    test_df[["value", "label", "index"]].values, labels, figure_path
-                )
-            else:
-                raise ValueError(
-                    f"Invalid dataset mode {self.dataset.get_dataset_mode()}"
-                )
+            # if self.dataset.get_dataset_mode() == "one-by-one":
+            #     if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
+            #         eval_res, labels, _ = self.review_agent.combined_eval(
+            #             best_rule_path, eval_mode="test"
+            #         )
+            #     else:
+            #         eval_res, labels, _ = self.review_agent.eval(
+            #             best_rule_path, self.dataset.get_test_df()
+            #         )
 
-            last_rule_path = best_rule_path
+            #     prefix = best_rule_path.split("/")[-1].split(".")[0]
+            #     figure_path = os.path.join(self.rule_path, f"eval_figure_{prefix}.png")
+            #     self.visualize(
+            #         self.dataset.get_test_df()[["value", "label", "index"]].values,
+            #         labels,
+            #         figure_path,
+            #     )
+            # elif self.dataset.get_dataset_mode() == "all-in-one":
+            #     # TODO: implement combine eval for all-in-one mode
+
+            #     prefix = best_rule_path.split("/")[-1].split(".")[0]
+            #     figure_path = os.path.join(self.rule_path, f"eval_figure_{prefix}.png")
+            #     if self.mode == "train-combined-fn" or self.mode == "train-combined-fp":
+            #         eval_res, labels, _ = self.review_agent.combined_eval_all_in_one(
+            #             best_rule_path, eval_mode="test"
+            #         )
+            #         dataset_dict = self.dataset.get_dataset_dict()
+            #         test_df = []
+            #         for _, (_, df) in dataset_dict.items():
+            #             test_df.append(df)
+            #         test_df = pd.concat(test_df)
+            #     else:
+            #         test_dict = self.dataset.get_test_dict()
+            #         eval_res, labels, _ = self.review_agent.eval_all_in_one(
+            #             best_rule_path, test_dict
+            #         )
+
+            #         # create test_df from test_dict by concatenating all the dataframes
+            #         test_df = []
+            #         for k, df in test_dict.items():
+            #             test_df.append(df)
+            #         test_df = pd.concat(test_df)
+            #     # remove index column
+            #     test_df = test_df.drop(columns=["index"])
+            #     # re-add index column
+            #     test_df["index"] = np.arange(len(test_df))
+            #     self.visualize(
+            #         test_df[["value", "label", "index"]].values, labels, figure_path
+            #     )
+            # else:
+            #     raise ValueError(
+            #         f"Invalid dataset mode {self.dataset.get_dataset_mode()}"
+            #     )
             self.cur_iter += 1
 
-        # output stats to stats.json
+        self.wrapup_run(start_time, last_rule_paths)
+
+    def wrapup_run(self, start_time, last_rule_path=None): 
         stats_path = os.path.join(self.rule_path, "stats.json")
         stats = {
             "cur_iter": self.cur_iter,
             "max_iter": self.max_iter,
             "max_time": self.max_time,
             "time_elapsed": time.time() - start_time,
-            "best_rule_path": last_rule_path,
+            "best_rule_paths": last_rule_path,
             "mode": self.mode,
             "token_count": {},
         }
@@ -595,7 +1021,7 @@ class Engine(ABC):
                         )
                         dataset_dict = self.dataset.get_dataset_dict()
                         test_df = []
-                        for _, (_, df) in dataset_dict.items():
+                        for _, (_, df, *_rest) in dataset_dict.items():
                             test_df.append(df)
                         test_df = pd.concat(test_df)
                     else:

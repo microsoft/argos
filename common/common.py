@@ -9,6 +9,9 @@ import pandas as pd
 import tiktoken
 
 from common.exception import RuntimeException
+from eval_metrics.event_f1pa import EventF1PA
+from eval_metrics.point_f1 import PointF1
+from eval_metrics.point_f1pa import PointF1PA
 
 EPS = 1e-10
 
@@ -34,6 +37,8 @@ def num_tokens_from_messages(messages, model="gpt-3.5-turbo"):
         "gpt-35-turbo-16k",
         "gpt-4o",
         "gpt-4-32k",
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
     }:
         tokens_per_message = 3
         tokens_per_name = 1
@@ -276,6 +281,7 @@ def calculate_performance(labels, gt_labels):
     res_dict = {"precision": precision, "recall": recall, "f1": f1}
     return res_dict
 
+
 def format_check(df, rule_path, labels):
     if len(df) != len(labels):
         raise RuntimeException(
@@ -317,3 +323,5 @@ def cleanup_global_env():
         if key not in essential_keys:
             del globals()[key]
 
+
+# validation_test()

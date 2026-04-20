@@ -7,21 +7,24 @@ import os
 import pprint
 import re
 import sys
+import threading
 import time
+import random
 from abc import ABC, abstractmethod
 
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
 
 from common.common import num_tokens_from_messages
 
 MAX_ITER = 100
-TIMEOUT = 30 * 60 * 5
+TIMEOUT = 60 * 60
 TIMEOUT_FIRST_REVIEW = 2 * 60
-TIMEOUT_LLM = 5 * 60
-TIMEOUT_PER_REVIEW = 2 * 60
+TIMEOUT_LLM = 20 * 60 * 10
+TIMEOUT_PER_REVIEW = 20 * 60 * 10
 TIMEOUT_IMAGE = 10 * 60
 TIMEOUT_INFERENCE = 1 * 60
 
+SELF_HOSTED_LLM_LIST = ["meta-llama/Llama-3.1-8B-Instruct", "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"]
 
 class LLM:
     def __init__(
@@ -37,13 +40,10 @@ class LLM:
         self.past_message_num = max(0, past_message_num)
         # list of tuple of (input_token_count, output_token_count)
         self.input_output_token_count = []
-        self.messages = [
-            {
-                "role": "system",
-                "content": self.system_prompt,
-            }
-        ]
+        self._token_count_lock = threading.Lock()
 
+        self._thread_local = threading.local()
+        
         self.parameters = {
             "model": engine,
             "temperature": temperature,
@@ -55,34 +55,67 @@ class LLM:
             "n": 1,
         }
 
-        self._openai = AzureOpenAI(
-            api_key=os.environ["OPENAI_AZURE_API_KEY"],
-            azure_endpoint=os.environ["OPENAI_AZURE_ENDPOINT"],
-            api_version=os.environ["OPENAI_AZURE_API_VERSION"],
-        )
+        if(self.engine in SELF_HOSTED_LLM_LIST):
+            self._openai = OpenAI(
+                api_key=os.environ["OPENAI_AZURE_API_KEY"],
+                base_url=os.environ["OPENAI_AZURE_ENDPOINT"],
+            )
+            # self._assert_openai_client_connect()
+        else:
+            self._openai = AzureOpenAI(
+                api_key=os.environ["OPENAI_AZURE_API_KEY"],
+                azure_endpoint=os.environ["OPENAI_AZURE_ENDPOINT"],
+                api_version=os.environ["OPENAI_AZURE_API_VERSION"],
+            )
 
         logging.info(f"Initialized LLM with the following parameters:")
         logging.info(pprint.pformat(self.parameters, width=120, compact=True))
 
+    def _assert_openai_client_connect(self):
+        try:
+            _ = self._openai.chat.completions.create(
+                messages= [
+                    {
+                        "role": "user",
+                        "content": "Just say hello world back to me. Don't output anything else.",
+                    }
+                ],
+                model=self.engine,
+            )
+        except Exception as e:
+            logging.exception(e)
+            raise Exception("OpenAI client connection failed.")
+        
+    def _init_messages(self):
+        return [{"role": "system", "content": self.system_prompt}]
+    
+    def get_messages(self):
+        if not hasattr(self._thread_local, "messages"):
+            self._thread_local.messages = self._init_messages()
+        return self._thread_local.messages
+
     def reset(self) -> None:
         self.update_messages(reset=True)
 
-    def update_messages(self, reset=False) -> None:
-        if self.past_message_num > 0 and not reset:
-            self.messages = [self.messages[0]] + self.messages[1:][
-                -self.past_message_num :
-            ]
+    def reset_system_prompt(self, system_prompt: str) -> None:
+        self.system_prompt = system_prompt
+        messages = self.get_messages()
+        messages[0]["content"] = self.system_prompt
+
+
+    def update_messages(self, reset=False):
+        if reset:
+            self._thread_local.messages = self._init_messages()
         else:
-            self.messages = [self.messages[0]]
-
+            messages = self.get_messages()
+            if self.past_message_num > 0:
+                self._thread_local.messages = [messages[0]] + messages[1:][-self.past_message_num:]
+            else:
+                self._thread_local.messages = [messages[0]]
+                
     def query(self, user_prompt: str) -> str:
-        self.messages.append(
-            {
-                "role": "user",
-                "content": user_prompt,
-            }
-        )
-
+        messages = self.get_messages()
+        messages.append({"role": "user", "content": user_prompt})
         return self.send_messages()
 
     def query_with_image(self, user_prompt: str, image_path: str) -> str:
@@ -102,73 +135,63 @@ class LLM:
                 },
             },
         ]
-        self.messages.append(
-            {
-                "role": "user",
-                "content": content,
-            }
-        )
-
-        # print(f"[LLM] Start to query {self.name} with the following prompts and image from image path {image_path}:")
-        # print(pprint.pformat(user_prompt, width=120, compact=True))
-
+        messages = self.get_messages()
+        messages.append({"role": "user", "content": content})
         return self.send_messages()
 
     def send_messages(self):
-        ans, timeout = "", 2
-        input_token_count = num_tokens_from_messages(self.messages, model=self.engine)
+        messages = self.get_messages()
+        ans, timeout = "", 0.1
+        input_token_count = num_tokens_from_messages(messages, model=self.engine)
 
         start_time = time.time()
         while not ans and time.time() - start_time < TIMEOUT_LLM:
             try:
-                time.sleep(timeout)
                 response = self._openai.chat.completions.create(
-                    messages=self.messages, **self.parameters
+                    messages=messages, **self.parameters,
                 )
+                if isinstance(response, list):
+                    response = response[0]
+                    if response.error:
+                        raise Exception(response.error)
                 ans = response.choices[0].message.content
             except Exception as e:
                 logging.exception(e)
+
             if not ans:
-                timeout = timeout + 1 if timeout < 5 else timeout * 2
-                logging.info(f"Will retry after {timeout} seconds ...")
+                wait_time = min(timeout * 2, TIMEOUT_LLM)
+                wait_time += random.uniform(0, 1)
+                logging.info(f"Will retry after {wait_time:.2f} seconds ...")
+                time.sleep(wait_time)
+                timeout = wait_time
 
         if not ans:
             raise TimeoutError(f"Timeout after {TIMEOUT_LLM} seconds.")
 
         elapsed_time = time.time() - start_time
-
-        logging.info(
-            f"[LLM] Query {self.name} finished with the following answer after {elapsed_time} seconds:"
-        )
+        logging.info(f"[LLM] Query {self.name} finished after {elapsed_time:.2f} seconds")
         logging.info(ans)
 
-        self.messages.append(
-            {
-                "role": "assistant",
-                "content": ans,
-            }
-        )
-        output_messages = [self.messages[-1]]
-        output_token_count = num_tokens_from_messages(
-            output_messages, model=self.engine
-        )
+        messages.append({"role": "assistant", "content": ans})
+        output_token_count = num_tokens_from_messages([messages[-1]], model=self.engine)
+        
+        logging.info(f"[LLM] Input tokens: {input_token_count}, Output tokens: {output_token_count}")
 
-        self.input_output_token_count.append((input_token_count, output_token_count))
+        with self._token_count_lock:
+            self.input_output_token_count.append((input_token_count, output_token_count))
 
         self.update_messages()
         return ans
 
     def get_token_count(self):
-        total_input_token_count = 0
-        total_output_token_count = 0
-        for input_token_count, output_token_count in self.input_output_token_count:
-            total_input_token_count += input_token_count
-            total_output_token_count += output_token_count
-        return (
-            self.input_output_token_count,
-            total_input_token_count,
-            total_output_token_count,
-        )
+        with self._token_count_lock:
+            total_input_token_count = sum(x[0] for x in self.input_output_token_count)
+            total_output_token_count = sum(x[1] for x in self.input_output_token_count)
+            return (
+                list(self.input_output_token_count),
+                total_input_token_count,
+                total_output_token_count,
+            )
 
 
 class Agent(ABC):

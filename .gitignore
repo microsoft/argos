@@ -163,3 +163,9 @@ cython_debug/
 
 # Results
 generated_rules/
+results/
+out/
+benchmark/
+openevolve_output*/
+baseline/openevolve/results_no_sample_feedback/
+baseline/openevolve/results_sample_feedback/
