@@ -246,9 +246,15 @@ class Engine(ABC):
                     raise e  # Rethrow unknown exceptions
 
         if eval_res is None:
-            # copy back the original rule
+            # copy back the original rule when available; on the first iteration
+            # there may be no previous rule to restore, so keep the current rule.
             # os.system(f"cp {temp_res_path} {rule_file_path}")
-            os.system(f"cp {last_rule_path} {rule_file_path}")
+            if last_rule_path is not None:
+                os.system(f"cp {last_rule_path} {rule_file_path}")
+            else:
+                logging.info(
+                    f"[TrainingEngine]: No previous rule available for fallback; keeping current rule {rule_file_path}."
+                )
             try:
                 eval_res, _ , _ = self.review_agent.eval_test(rule_file_path, output_full_res=True)
             except Exception as e:
