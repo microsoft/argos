@@ -28,8 +28,14 @@ class PointF1(EvalInterface):
             y_true=labels, y_score=scores
         )
 
-        f1_all = (2 * prec * recall) / (prec + recall)
-        max_idx = np.argmax(f1_all)
+        denom = prec + recall
+        f1_all = np.divide(
+            2 * prec * recall,
+            denom,
+            out=np.zeros_like(denom, dtype=float),
+            where=denom != 0,
+        )
+        max_idx = np.nanargmax(f1_all)
 
         return F1Class(
             name=self.name, p=prec[max_idx], r=recall[max_idx], f1=f1_all[max_idx]
