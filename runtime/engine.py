@@ -462,7 +462,10 @@ class Engine(ABC):
             with open(final_res_path, "w") as f:
                 json.dump(eval_res, f)
         else:
-            os.system(f"cp {last_rule_path} {self.get_rule_path(top_k_curr=id)}")
+            if last_rule_path is not None:
+                os.system(f"cp {last_rule_path} {self.get_rule_path(top_k_curr=id)}")
+            else:
+                logging.info("[TrainingEngine]: No previous rule available for fallback copy; evaluating current rule as-is.")
             eval_res, _, _ = self.review_agent.eval_test(
                 self.get_rule_path(top_k_curr=id), output_full_res=True
             )
