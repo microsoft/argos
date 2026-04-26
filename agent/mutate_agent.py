@@ -209,8 +209,13 @@ class MutateAgent(Agent):
                 mutate_rule = self.select_mutate_rule_with_probability()
                 new_system_prompt = generate_mutate_prompt(self.chunk_size, mutate_rule)
                 print(f"[MutateAgent] Mutate rule: {mutate_rule}")
-                self.LLM.reset_system_prompt(new_system_prompt)
-                self.generate_mutate_code(curr_rule_path, mutate_rule, path_to_save)
+
+                if not hasattr(self, "_llm_lock"):
+                    self._llm_lock = threading.Lock()
+
+                with self._llm_lock:
+                    self.LLM.reset_system_prompt(new_system_prompt)
+                    self.generate_mutate_code(curr_rule_path, mutate_rule, path_to_save)
                 break  # Successfully mutated, move to the next iteration
             except Exception as e:
                 tries += 1
