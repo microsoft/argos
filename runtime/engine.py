@@ -26,7 +26,7 @@ from datasets.dataset import ArgosDataset
 from selector.train_perf_selector import TrainPerfSelector
 import threading
 
-DEFAULT_PARRALLEL_CORE = 2
+DEFAULT_PARALLEL_CORE = 2
 
 class Engine(ABC):
     def __init__(
@@ -44,7 +44,7 @@ class Engine(ABC):
         llm_engine="gpt-4o",
         timeout=150,
         sample_per_prompt=1,
-        parallel_core=DEFAULT_PARRALLEL_CORE,
+        parallel_core=DEFAULT_PARALLEL_CORE,
         rule_per_group=3,
         max_iter=None,
     ):
@@ -446,6 +446,7 @@ class Engine(ABC):
 
         self.repair_agent.run(curr_dfs[0], self.get_rule_path(top_k_curr=id))
 
+        eval_res = None
         while time.time() - start_time < self.max_time:
             try:
                 eval_res, labels, _ = self.review_agent.run(self.get_rule_path(top_k_curr=id), last_rule_path)

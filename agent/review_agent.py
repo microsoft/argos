@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import time
 
 import numpy as np
@@ -24,7 +23,7 @@ from eval_metrics.event_f1pa import EventF1PA
 from eval_metrics.point_f1 import PointF1
 from eval_metrics.point_f1pa import PointF1PA
 
-EVOLUTION_THESHOLD = 0.10
+EVOLUTION_THRESHOLD = 0.10
 
 class ReviewAgent(Agent):
     def __init__(
@@ -273,7 +272,7 @@ class ReviewAgent(Agent):
                     continue
                 # TODO: maybe performance staying the same is also a form of regression
                 if self.mode == "train-evolution":
-                    if curr_validate_res[key] < last_validate_res[key] - EVOLUTION_THESHOLD:
+                    if curr_validate_res[key] < last_validate_res[key] - EVOLUTION_THRESHOLD:
                         has_regression = True
                         break
                 else:

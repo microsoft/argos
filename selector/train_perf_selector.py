@@ -103,11 +103,14 @@ class TrainPerfSelector(ABC):
             perf_list.append((rule_path, perf["f1"]))
 
         if prev_best_rule is not None:
-            # Sort by F1 score, if same, sort by previous best rank (default to keep the closest one)
+            # Sort by F1 score descending; on ties, prefer the pipeline that
+            # was the previous best (smallest prev_rank). Since reverse=True
+            # sorts the whole tuple descending, negate prev_rank so that
+            # smaller ranks come first within equal F1.
             perf_list.sort(
                 key=lambda x: (
                 x[1],  # Sort by F1 score
-                prev_rank.get(self.extract_pipeline_id(x[0]), float("inf")),
+                -prev_rank.get(self.extract_pipeline_id(x[0]), float("inf")),
                 ),
                 reverse=True
             )

@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 
@@ -84,8 +85,22 @@ def train_and_test(file_path):
     return res_dict
 
 if __name__ == "__main__":
-    base_path = DATASET_PATH
-    result_path = RESULT_PATH
+    parser = argparse.ArgumentParser(description="Decision-tree baseline for KPI CSVs")
+    parser.add_argument(
+        "--dataset-path",
+        required=True,
+        help="Directory containing <metric>.csv files for each KPI",
+    )
+    parser.add_argument(
+        "--result-path",
+        required=True,
+        help="Directory where results.csv will be written",
+    )
+    args = parser.parse_args()
+
+    base_path = args.dataset_path
+    result_path = args.result_path
+    os.makedirs(result_path, exist_ok=True)
     with open(f"{result_path}/results.csv", "w") as f:
         f.write("metric,f1,precision,recall,\n")
         for metric in kpi_metrics:

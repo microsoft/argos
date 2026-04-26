@@ -2,7 +2,7 @@ from abc import ABCMeta, abstractmethod
 from typing import Dict, Type
 
 
-class MetricInterface(object):
+class MetricInterface(metaclass=ABCMeta):
     """
     The MetricInterface class is an abstract base class that defines the interface for metrics. It serves as a blueprint for creating subclasses that represent specific metrics.
 
@@ -17,8 +17,6 @@ class MetricInterface(object):
         - to_dict(self): This abstract method converts the metric object into a dictionary representation. It should return a dictionary containing the metric's values and any additional information needed for representation or storage.
 
     """
-
-    __metaclass__ = ABCMeta
 
     @abstractmethod
     def add(self, other_metric):
@@ -42,7 +40,7 @@ class MetricInterface(object):
         raise NotImplementedError()
 
 
-class EvalInterface(object):
+class EvalInterface(metaclass=ABCMeta):
     """
     The EvalInterface is an abstract base class that defines the interface for evaluation metrics in a generic evaluation system. It serves as a blueprint for concrete evaluation metric classes that implement specific evaluation logic.
 
@@ -51,8 +49,6 @@ class EvalInterface(object):
 
         - get_name(self): Abstract method that returns the name of the evaluation metric. Concrete classes implementing this interface should provide their own implementation of this method.
     """
-
-    __metaclass__ = ABCMeta
 
     @abstractmethod
     def calc(self, scores, labels, margins) -> Type[MetricInterface]:
@@ -70,6 +66,5 @@ class EvalInterface(object):
         """
         raise NotImplementedError()
 
-    @abstractmethod
     def get_name(self):
         return self.name
