@@ -1,0 +1,29 @@
+# Agent-wide configuration. 
+
+# Maximum training iterations.
+max_iter: 100
+
+# Overall timeout (seconds). Used by all agents.
+timeout: 3600  # 60 * 60
+
+# Timeout for the first review iteration only. If the ReviewAgent hasn't produced
+# its first review within this window, raise TimeoutException so training can move on.
+timeout_first_review: 120  # 2 * 60
+
+# Timeout for a single LLM call.
+timeout_llm: 12000  # 20 * 60 * 10
+
+# Timeout for a single ReviewAgent run cycle including retries.
+timeout_per_review: 12000  # 20 * 60 * 10
+
+# Timeout for a single ImageAgent run.
+timeout_image: 600  # 10 * 60
+
+# Timeout for running the LLM-generated inference function.
+timeout_inference: 60  # 1 * 60
+
+# Models served via the self-hosted OpenAI-compatible endpoint (base OpenAI client).
+# Anything not in this list goes through the Azure OpenAI client.
+self_hosted_llm_list:
+  - meta-llama/Llama-3.1-8B-Instruct
+  - deepseek-ai/DeepSeek-R1-Distill-Qwen-14B

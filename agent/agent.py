@@ -15,16 +15,20 @@ from abc import ABC, abstractmethod
 from openai import AzureOpenAI, OpenAI
 
 from common.common import num_tokens_from_messages
+from config import cfg
 
-MAX_ITER = 100
-TIMEOUT = 60 * 60
-TIMEOUT_FIRST_REVIEW = 2 * 60
-TIMEOUT_LLM = 20 * 60 * 10
-TIMEOUT_PER_REVIEW = 20 * 60 * 10
-TIMEOUT_IMAGE = 10 * 60
-TIMEOUT_INFERENCE = 1 * 60
-
-SELF_HOSTED_LLM_LIST = ["meta-llama/Llama-3.1-8B-Instruct", "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"]
+# Agent-wide constants. Sourced from config/agent.yaml via OmegaConf. Kept as
+# module-level names so existing callers (baseline/llmad.py, agent/image_agent.py,
+# agent/repair_agent.py, agent/review_agent.py, agent/detection_agent.py,
+# runtime/engine.py) continue to import them unchanged.
+MAX_ITER = cfg.max_iter
+TIMEOUT = cfg.timeout
+TIMEOUT_FIRST_REVIEW = cfg.timeout_first_review
+TIMEOUT_LLM = cfg.timeout_llm
+TIMEOUT_PER_REVIEW = cfg.timeout_per_review
+TIMEOUT_IMAGE = cfg.timeout_image
+TIMEOUT_INFERENCE = cfg.timeout_inference
+SELF_HOSTED_LLM_LIST = list(cfg.self_hosted_llm_list)
 
 class LLM:
     def __init__(
