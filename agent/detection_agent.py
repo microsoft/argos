@@ -14,6 +14,9 @@ from sklearn.ensemble import IsolationForest
 from sklearn.metrics import classification_report, confusion_matrix
 
 from agent.agent import LLM, TIMEOUT, Agent
+from agent.prompts.detection import (BASE_MODEL_PROMPT, DETECTION_AGENT_V1_PROMPT,
+                                     build_detection_agent_v2_prompt,
+                                     build_detection_agent_v3_prompt)
 from eval_metrics.event_f1pa import EventF1PA
 from eval_metrics.point_f1 import PointF1
 from eval_metrics.point_f1pa import PointF1PA
@@ -21,29 +24,9 @@ from eval_metrics.point_f1pa import PointF1PA
 
 class DetectionAgent(Agent):
     def __init__(self, dataset, rule_path="/tmp") -> None:
-        detection_agent_prompt = """
-You are an AI assistant that helps people write rules to determine whether the pattern of time series data is abnormal (negative) or not (positive). The time series data is collected during distributed training jobs in InfiniBand clusters. Each data sample is a list of 20 integer number, each list represents the InfiniBand networking received KBytes and sent KBytes (2 numbers) during 30 seconds. You task is to write specific rules to describe and remember the given abnormal (negative) or normal (positive) samples, you should describe the pattern of each sample, including but not limited to average, trend (e.g., whether increase/decrease for at least 4 continous numbers), existence of regression (e.g., last 4 continuous numbers all 20% lower than mean), etc. Note that the sample is time series so the order of numbers inside each sample is also important. You should check at least all 4 continous numbers as a trend rather than numpy.any. ONLY write tight rules for abnormal (negative) samples and DO NOT affect any existing normal (positive) samples.
-
-You should achieve the task in the following steps:
-1. You will be given the data sample in following format:
-##### NEGATIVE/ABNORMAL DATA
-<multiple known negative/abnormal data samples, each sample contains 20 int number lists>
-##### POSITIVE/NORMAL DATA
-<multiple known positive/normal data samples, each sample contains 20 int number lists>
-
-2. You should give a python function `is_negative(sample: np.ndarray) -> bool` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample as input and determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. You should return TRUE for the given negative/abnormal samples and return FALSE for those positive/normal samples in the same function. **You should write this function step by step. Specifically, you MUST add or modify ONE rule at a time: when POSITIVE/NORMAL DATA is None you should add ONE rule (ONE if statement), otherwise you should modify your last rule to reduce newly introduced POSITIVE/NORMAL samples.** DO NOT explain anything, DO give python function directly. You should strictly use the following format:
-##### CODE
-```py
-def is_negative(sample: np.ndarray) -> bool:
-  # your code to describe and remember the pattern of given samples
-  # convert to ndarray in MB/s by int division with 2^10 and remove all leading and trailing zeros in the list first
-  # return True for negative/abnormal samples and False for positive/normal samples
-```
-
-3. You will be given more samples and repeat 1. to update the rules in function. For negative samples you should return True, while for positive samples you should return False. DO remember the updated rules should also include all previous samples in best efforts. DO merge the rules if they use similar conditions.
-        """.strip()
+        detection_agent_prompt = DETECTION_AGENT_V1_PROMPT.strip()
         self.LLM = LLM(
-            system_prompt=detection_agent_prompt.strip(),
+            system_prompt=detection_agent_prompt,
             temperature=0.75,
             past_message_num=10,
         )
@@ -105,9 +88,7 @@ def is_negative(sample: np.ndarray) -> bool:
         )
 
     def gen_base_model(self) -> None:
-        base_model_prompt = """
-You are an AI assistant that helps people write rules to determine whether the pattern of time series data is seen or not. Please choose a fitable machine learning model for this task and give the python function in scikit-learn. Function arguments include features and labels, and function should return the model directly. DO give the python code in '##### CODE\n```py```' format in markdown. DO NOT explain.
-        """.strip()
+        base_model_prompt = BASE_MODEL_PROMPT.strip()
         ans = LLM(base_model_prompt, temperature=0.7, past_message_num=10).query(
             "Please give the python function to train the model"
         )
@@ -288,37 +269,9 @@ You are an AI assistant that helps people write rules to determine whether the p
 class DetectionAgentV2(Agent):
     def __init__(self, dataset_path, rule_path="/tmp") -> None:
         self.chunk_size = 2500
-        detection_agent_prompt = f"""
-You are an AI assistant that helps people write rules to determine whether the pattern of time series data is abnormal (negative) or not (positive). The time series data is collected during a task for AIOps. Each data segment contains {self.chunk_size} continuous samples, and each sample is a tuple of (value, label, index), label indicates the current value is abnormal (label=1), or normal (label=0). You task is to write specific rules to describe and remember the given abnormal (negative) or normal (positive) samples, you should describe the pattern of each sample, including but not limited to average, trend (e.g., whether increase/decrease for at least 4 continous numbers), existence of regression (e.g., last 4 continuous numbers all 20% lower than mean), etc. Note that the sample is time series so the order of numbers inside each sample is also important. 
-
-You should achieve the task in the following steps:
-1. You will be given the data sample in following format:
-##### DATA
-<multiple known data samples, each sample contains {self.chunk_size} continuous samples, each sample is a tuple of (value, label, index)>
-
-2. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape ({self.chunk_size}, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. You should return the labels as an np.ndarray of shape ({self.chunk_size}), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. Beyond anomalies, you can describe how normal data behave in comments, in the format of "Normal Rule 1 \n Normal Rule 2 ...". Ideally, if inference function returns no abnormal indices, then the data MUST satisfy all normal rules you describe in comments.  You should strictly use the following format:
-##### CODE
-```python
-# import necessary libraries for your code
-def inference(sample: np.ndarray) -> np.ndarray:
-    # your comment to describe how normal data behave
-    # Normal Rule 1
-    # Normal Rule 2
-    # your code to detect if the given sample is abnormal
-    # Abnormal Rule 1
-    if ...
-    # Abnormal Rule 2
-    if ...
-    # return labels as a 1d numpy array indicating abnormal/normal of each index
-```
-3. IMPORTANT: Your code should not hard code any information about the label given to you in example data, as the final function only takes in a 2-tuple of (value, index).
-4. You should not hard code the indices of anomalies, and you should also not assume that the inference function will accept a fixed-size sample. The sample size may vary, and the function should be able to handle samples of any size. You should also not assume that the sample will contain any specific number of anomalies. The sample may contain any number of anomalies, including zero anomalies. You should write the function to handle any number of anomalies in the sample. You should not hard code any information about labels, since in real setting there is no labels. You should only use the information in the sample to determine if it is abnormal or not.
-5. Each iteration you will be able to see the code you wrote in the last iteration, and you should modify the code to reduce the number of false positives.
-6. You should make sure the python code is correct and can be executed without any error.
-7. If your code uses any external libraries, you should include the import statements in the code.
-        """.strip()
+        detection_agent_prompt = build_detection_agent_v2_prompt(self.chunk_size)
         self.LLM = LLM(
-            system_prompt=detection_agent_prompt.strip(),
+            system_prompt=detection_agent_prompt,
             temperature=0.75,
             past_message_num=10,
         )
@@ -526,180 +479,9 @@ class DetectionAgentV3(Agent):
     ) -> None:
         self.chunk_size = chunk_size
         self.mode = mode
-        if mode == "train-combined-fn":
-            detection_agent_prompt = f"""
-You are an AI assistant that helps people write rules to determine whether the pattern of time series data is abnormal (negative) or not (positive). The time series data is collected during a task for AIOps. Each data segment contains {self.chunk_size} continuous samples, and each sample is a tuple of (value, label, index), label indicates the current value is abnormal (label=1), or normal (label=0). 
-
-We have previously developed anomaly detection model that can detect abnormal samples. Your task is to write compensated rules that detects false negatives from the anomaly detection model.
-
-You should write specific rules to describe and remember the given abnormal (negative) or normal (positive) samples, you should describe the pattern of each sample, including but not limited to average, trend (e.g., whether increase/decrease for at least 4 continous numbers), existence of regression (e.g., last 4 continuous numbers all 20% lower than mean), etc. Note that the sample is time series so the order of numbers inside each sample is also important. 
-
-IMPORTANT: You should also make sure your rules do not affect the existing normal samples. You should only write rules to detect false negatives from the anomaly detection model.
-
-You should achieve the task in the following steps:
-1. You will be given the data sample in following format:
-##### DATA 0
-<multiple known data samples, each sample contains {self.chunk_size} continuous samples, each sample is a tuple of (value, label, index)>
-
-2. Optionally, you will also be given the normal data samples in following format:
-##### NORMAL DATA 0
-<multiple known normal data samples, each sample contains {self.chunk_size} continuous samples, each sample is a tuple of (value, label, index)>, where label should all be 0.
-
-2. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (X, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. Notice that X does not need to be {self.chunk_size}. You should return the labels as an np.ndarray of shape (X), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. Beyond anomalies, you can describe how normal data behave in comments, in the format of "Normal Rule 1 \n Normal Rule 2 ...". Ideally, if inference function returns no abnormal indices, then the data MUST satisfy all normal rules you describe in comments.  You should strictly use the following format:
-##### CODE
-```python
-# import necessary libraries for your code
-def inference(sample: np.ndarray) -> np.ndarray:
-    # your comment to describe how normal data behave
-    # Normal Rule 1
-    # Normal Rule 2
-    # your code to detect if the given sample is abnormal
-    # Abnormal Rule 1
-    if ...
-    # Abnormal Rule 2
-    if ...
-    # return labels as a 1d numpy array indicating abnormal/normal of each index
-```
-3. IMPORTANT: Your code should not hard code any information about the label given to you in example data, as the final function only takes in a 2-tuple of (value, index).
-4. You should not hard code the indices of anomalies, and you should also not assume that the inference function will accept a fixed-size sample. The sample size may vary, and the function should be able to handle samples of any size. You should also not assume that the sample will contain any specific number of anomalies. The sample may contain any number of anomalies, including zero anomalies. You should write the function to handle any number of anomalies in the sample. You should not hard code any information about labels, since in real setting there is no labels. You should only use the information in the sample to determine if it is abnormal or not.
-5. Each iteration you will be able to see the code you wrote in the last iteration, and you should modify the code to reduce the number of false positives.
-6. You should make sure the python code is correct and can be executed without any error.
-7. If your code uses any external libraries, you should include the import statements in the code.
-8. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your code for only once, don't use them for any other purpose.
-9. You will be given several abnormal data samples and several normal data samples in each iteration. You should write rules that contain common abnormal paterns in the abnormal data samples and you should make sure your rules do not affect the normal data samples. 
-        """.strip()
-        elif mode == "train-combined-fp":
-            detection_agent_prompt = f"""
-You are an AI assistant that helps people write rules to determine whether the pattern of time series data is abnormal (negative) or not (positive). The time series data is collected during a task for AIOps. Each data segment contains {self.chunk_size} continuous samples, and each sample is a tuple of (value, label, index), label indicates the current value is abnormal (label=1), or normal (label=0). 
-
-We have previously developed anomaly detection model that can detect abnormal samples. Your task is to write compensated rules that detects and fixes false positives from the anomaly detection model. False positives are normal samples that are incorrectly detected as abnormal.
-
-You should write specific rules to describe and remember the given abnormal (negative) or normal (positive) samples, you should describe the pattern of each sample, including but not limited to average, trend (e.g., whether increase/decrease for at least 4 continous numbers), existence of regression (e.g., last 4 continuous numbers all 20% lower than mean), etc. Note that the sample is time series so the order of numbers inside each sample is also important. 
-
-IMPORTANT: You should also make sure your rules do not affect the existing abnormal samples. You should only write rules to detect false positives (i.e. returns normal labels for the input data) from the anomaly detection model.
-
-You should achieve the task in the following steps:
-1. You will be given the data sample in following format:
-##### DATA 0
-<multiple known data samples, each sample contains {self.chunk_size} continuous samples, each sample is a tuple of (value, label, index)>, this is a data segment of false positive, where your rule should return all normal labels.
-
-2. Optionally, you will also be given the abnormal data samples in following format:
-##### ABNORMAL DATA 0
-<multiple known abnormal data samples, each sample contains {self.chunk_size} continuous samples, each sample is a tuple of (value, label, index)>. You should make sure your rule does not affect the existing abnormal samples and still return abnormal labels for this data.
-
-2. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (X, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. Notice that X does not need to be {self.chunk_size}. You should return the labels as an np.ndarray of shape (X), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. Beyond anomalies, you can describe how normal data behave in comments, in the format of "Normal Rule 1 \n Normal Rule 2 ...". Ideally, if inference function returns no abnormal indices, then the data MUST satisfy all normal rules you describe in comments.  You should strictly use the following format:
-##### CODE
-```python
-# import necessary libraries for your code
-def inference(sample: np.ndarray) -> np.ndarray:
-    # your comment to describe how normal data behave
-    # Normal Rule 1
-    # Normal Rule 2
-    # your code to detect if the given sample is abnormal
-    # Abnormal Rule 1
-    if ...
-    # Abnormal Rule 2
-    if ...
-    # return labels as a 1d numpy array indicating abnormal/normal of each index
-```
-3. IMPORTANT: Your code should not hard code any information about the label given to you in example data, as the final function only takes in a 2-tuple of (value, index).
-4. You should not hard code the indices of anomalies, and you should also not assume that the inference function will accept a fixed-size sample. The sample size may vary, and the function should be able to handle samples of any size. You should also not assume that the sample will contain any specific number of anomalies. The sample may contain any number of anomalies, including zero anomalies. You should write the function to handle any number of anomalies in the sample. You should not hard code any information about labels, since in real setting there is no labels. You should only use the information in the sample to determine if it is abnormal or not.
-5. Each iteration you will be able to see the code you wrote in the last iteration, and you should modify the code to reduce the number of false positives.
-6. You should make sure the python code is correct and can be executed without any error.
-7. If your code uses any external libraries, you should include the import statements in the code.
-8. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your code for only once, don't use them for any other purpose.
-9. You will be given several abnormal data samples and several normal data samples in each iteration. You should write rules that contain common abnormal paterns in the abnormal data samples and you should make sure your rules do not affect the normal data samples. 
-        """.strip()
-        elif mode == "train-LLM-only-image":
-            detection_agent_prompt = f"""
-    You are an AI assistant that helps people write rules to determine whether the pattern of time series data is abnormal (negative) or not (positive). The time series data is collected during a task for AIOps. Each data segment contains {self.chunk_size} continuous samples, and each sample is a tuple of (value, label, index), label indicates the current value is abnormal (label=1), or normal (label=0). You task is to write specific rules to describe and remember the given abnormal (negative) or normal (positive) samples, you should describe the pattern of each sample, including but not limited to average, trend (e.g., whether increase/decrease for at least 4 continous numbers), existence of regression (e.g., last 4 continuous numbers all 20% lower than mean), etc. Note that the sample is time series so the order of numbers inside each sample is also important. 
-
-    You should achieve the task in the following steps:
-    1. You will be given the data sample in following format:
-    ##### DATA
-    <multiple known data samples, each sample contains {self.chunk_size} continuous samples, each sample is a tuple of (value, label, index)>
-
-    2. You will also be given a high-level description of the anomaly types and explanation for the dataset you received. The anomaly types are generated by looking at the figures of the dataset. The anomaly types may not fully cover all the anomalies in the dataset, but it should give you a good overview of what kind of anomalies you are expecting. The anomaly types will be given in the following format:
-
-    ##### Anomaly Types BEGIN #####
-    # Anomaly Type 1: Description of anomaly type 1
-    # Anomaly Type 2: Description of anomaly type 2
-    ##### Anomaly Types END #####
-    
-    3. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (X, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. Notice that X does not need to be {self.chunk_size}. You should return the labels as an np.ndarray of shape (X), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. 
-    4. You should first put the anomaly types you received in the comment of the function. Beyond anomalies, you can describe how normal data behave in comments, in the format of "Normal Rule 1 \n Normal Rule 2 ...". Ideally, if inference function returns no abnormal indices, then the data MUST satisfy all normal rules you describe in comments. 
-    5. IMPORTANT: When you are writing abnormal rules, you should first take a look at the data given to you. If you see anomaly segment in the data (labeled as 1), you should think about which anomaly type this anomaly segment corresponds to. Then you should write abnormal rule that addresses this anomaly type based on your observation from the actual data.  You should be clear which anomaly type your anomaly rule is addressing. If there is already an abnormal rule addressing the anomaly type from the data, you can also update the abnormal rule based on your observation from the data. If you are writing an abnormal rule for anomalies not covered by the anomaly types given, you should provide reasoning on why it is needed. You should strictly use the following format:
-
-    ##### CODE
-    ```python
-    # import necessary libraries for your code
-    def inference(sample: np.ndarray) -> np.ndarray:
-        # Put anomaly types you received in the comment, IMPORTANT: You should directly copy the anomaly types given to you and do not modify it
-        ##### Anomaly Types BEGIN #####
-        # Anomaly Type 1: Description of anomaly type 1
-        # Anomaly Type 2: Description of anomaly type 2
-        ##### Anomaly Types END #####
-        # Your comment to describe how normal data behave
-        # Normal Rule 1
-        # Normal Rule 2
-        # Your code to detect if the given sample is abnormal
-        # Abnormal Rule 1: which anomaly type this rule is addressing or reasoning if it is not covered by the anomaly types
-        if ...
-        # Abnormal Rule 2: which anomaly type this rule is addressing or reasoning if it is not covered by the anomaly types
-        if ...
-        # return labels as a 1d numpy array indicating abnormal/normal of each index
-    ```
-    4. IMPORTANT: Your code should not hard code any information about the label given to you in example data, as the final function only takes in a 2-tuple of (value, index).
-    5. You should not hard code the indices of anomalies, and you should also not assume that the inference function will accept a fixed-size sample. The sample size may vary, and the function should be able to handle samples of any size. You should also not assume that the sample will contain any specific number of anomalies. The sample may contain any number of anomalies, including zero anomalies. You should write the function to handle any number of anomalies in the sample. You should not hard code any information about labels, since in real setting there is no labels. You should only use the information in the sample to determine if it is abnormal or not.
-    6. Each iteration you will be able to see the code you wrote in the last iteration, and you should modify the code to reduce the number of false positives or false negatives.
-    7. You should make sure the python code is correct and can be executed without any error.
-    8. If your code uses any external libraries, you should include the import statements in the code.
-    9. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your code for only once, don't use them for any other purpose.
-            """.strip()
-        # OLD
-        #     3. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (X, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. Notice that X does not need to be {self.chunk_size}. You should return the labels as an np.ndarray of shape (X), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. You should first put the anomaly types you received in the comment of the function. Beyond anomalies, you can describe how normal data behave in comments, in the format of "Normal Rule 1 \n Normal Rule 2 ...". Ideally, if inference function returns no abnormal indices, then the data MUST satisfy all normal rules you describe in comments.  When you are writing abnormal rules, you should be clear which anomaly type this rule is addressing. If you are writing an abnormal rule for anomalies not covered by the anomaly types given, you should provide reasoning on why it is needed. You should strictly use the following format:
-
-        # NEW
-        #     3. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (X, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. Notice that X does not need to be {self.chunk_size}. You should return the labels as an np.ndarray of shape (X), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal.
-        # 4. You should first put the anomaly types you received in the comment of the function. Beyond anomalies, you can describe how normal data behave in comments, in the format of "Normal Rule 1 \n Normal Rule 2 ...". Ideally, if inference function returns no abnormal indices, then the data MUST satisfy all normal rules you describe in comments.
-        # 5. IMPORTANT: When you are writing abnormal rules, you should first take a look at the data given to you. If you see anomaly segment in the data (labeled as 1), you should think about which anomaly type this anomaly segment corresponds to. Then you should write abnormal rule that addresses this anomaly type based on your observation from the actual data.  You should be clear which anomaly type your anomaly rule is addressing. If there is already an abnormal rule addressing the anomaly type from the data, you can also update the abnormal rule based on your observation from the data. If you are writing an abnormal rule for anomalies not covered by the anomaly types given, you should provide reasoning on why it is needed. You should strictly use the following format:
-        else:
-            detection_agent_prompt = f"""
-    You are an AI assistant that helps people write rules to determine whether the pattern of time series data is abnormal (negative) or not (positive). The time series data is collected during a task for AIOps. Each data segment contains {self.chunk_size} continuous samples, and each sample is a tuple of (value, label, index), label indicates the current value is abnormal (label=1), or normal (label=0). You task is to write specific rules to describe and remember the given abnormal (negative) or normal (positive) samples, you should describe the pattern of each sample, including but not limited to average, trend (e.g., whether increase/decrease for at least 4 continous numbers), existence of regression (e.g., last 4 continuous numbers all 20% lower than mean), etc. Note that the sample is time series so the order of numbers inside each sample is also important. 
-
-    You should achieve the task in the following steps:
-    1. You are provided the data sample in following format:
-    ##### DATA
-    <multiple known data samples, each sample contains {self.chunk_size} or fewer continuous samples, each sample is a tuple of (value, label, index)>
-
-    2. You should give a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (X, 2) as input, where each row is a tuple of (value, index). Your function should determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. Notice that X does not need to be {self.chunk_size}. You should return the labels as an np.ndarray of shape (X), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. Beyond anomalies, you can describe how normal data behave in comments, in the format of "Normal Rule 1 \n Normal Rule 2 ...". Ideally, if inference function returns no abnormal indices, then the data MUST satisfy all normal rules you describe in comments.  You should strictly use the following format:
-    ##### CODE
-    ```python
-    # import necessary libraries for your code
-    def inference(sample: np.ndarray) -> np.ndarray:
-        # your comment to describe how normal data behave
-        # Normal Rule 1
-        # Normal Rule 2
-        # your code to detect if the given sample is abnormal
-        # Abnormal Rule 1
-        if ...
-        # Abnormal Rule 2
-        if ...
-        # return labels as a 1d numpy array indicating abnormal/normal of each index
-    ```
-    3. IMPORTANT: Your code should not hard code any information about the label given to you in example data, as the final function only takes in a 2-tuple of (value, index).
-    4. You should not hard code the indices of anomalies, and you should also not assume that the inference function will accept a fixed-size sample. The sample size may vary, and the function should be able to handle samples of any size. You should also not assume that the sample will contain any specific number of anomalies. The sample may contain any number of anomalies, including zero anomalies. You should write the function to handle any number of anomalies in the sample. You should not hard code any information about labels, since in real setting there is no labels. You should only use the information in the sample to determine if it is abnormal or not.
-    5. Each iteration you will be able to see the code you wrote in the last iteration, and you should modify the code to reduce the number of false positives.
-    6. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your code for only once, don't use them for any other purpose.
-    7. You must only output the python function you write, and you must not output any other information.
-    8. Be sure to annotate any abnormal rules in the code using the comment # Abnormal Rule n, where n follows the file format's numbering convention.
-            """.strip()
-            # 6. You should make sure the python code is correct and can be executed without any error.
-            #     7. If your code uses any external libraries, you should include the import statements in the code.
-            # 9. You will be given several abnormal data samples and several normal data samples in each iteration. You should write rules that contain common abnormal paterns in the abnormal data samples and you should make sure your rules do not affect the normal data samples.
-        #    8. Optionally, you will also be given the figure of the data sample. You should take a careful look at the figure. The x-axis is the timestamp and the y-axis is the value for the metric. The line for the values is in blue color and the anomalies are labeled as red dots. The anomalies are the points that are significantly different from the normal data points. The normal data points are the ones that are not labeled as anomalies. You should write rules based on the figure and the data sample you received.
+        detection_agent_prompt = build_detection_agent_v3_prompt(self.chunk_size, mode)
         self.LLM = LLM(
-            system_prompt=detection_agent_prompt.strip(),
+            system_prompt=detection_agent_prompt,
             temperature=0.75,
             past_message_num=10,
             engine=llm_engine,

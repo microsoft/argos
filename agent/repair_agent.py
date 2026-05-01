@@ -5,6 +5,7 @@ import logging
 import time
 
 from agent.agent import LLM, TIMEOUT, TIMEOUT_INFERENCE, Agent
+from agent.prompts.repair import build_repair_agent_prompt
 from common.common import cleanup_global_env, format_check, run_with_timeout
 from common.exception import RuntimeException, SyntaxException
 
@@ -12,31 +13,9 @@ from common.exception import RuntimeException, SyntaxException
 class RepairAgent(Agent):
     def __init__(self, chunk_size, llm_engine="gpt-4o", timeout=150) -> None:
         self.chunk_size = chunk_size
-        repair_agent_prompt = f"""
-You are an AI assistant that fixs syntax and runtime erros in Python code. You will be given a Python code snippet along with the error message indicating details for syntax and/or runtime errors. You should fix the errors in the code and make sure the code can be executed without any error. 
-
-You should achieve the task in the following steps:
-
-1. You are given a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape ({self.chunk_size}, 2) as input, where each row is a tuple of (value, index). The function will determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. The function will return the labels as an np.ndarray of shape ({self.chunk_size}), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. The code will be given in the following format:
-##### CODE
-```python
-# import necessary libraries
-def inference(sample: np.ndarray) -> np.ndarray:
-    # Comment to describe how normal data behave
-    # Normal Rule 1
-    # Normal Rule 2
-    # Code to detect if the given sample is abnormal
-    # Abnormal Rule 1
-    if ...
-    # Abnormal Rule 2
-    if ...
-    # return labels as a 1d numpy array indicating abnormal/normal of each index
-```
-2. IMPORTANT: You should output the fixed code following the same format as the input code, wrapping the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your fixed code for only once, don't use them for any other purpose.
-3. You should only focus on fixing the errors in the code and make sure the code can be executed without any error. You must not change other logics of the code unrelated to the errors.
-        """.strip()
+        repair_agent_prompt = build_repair_agent_prompt(self.chunk_size)
         self.LLM = LLM(
-            system_prompt=repair_agent_prompt.strip(),
+            system_prompt=repair_agent_prompt,
             temperature=0.75,
             past_message_num=10,
             engine=llm_engine,

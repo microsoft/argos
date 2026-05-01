@@ -12,6 +12,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 
 from agent.agent import (LLM, TIMEOUT, TIMEOUT_FIRST_REVIEW, TIMEOUT_INFERENCE,
                          TIMEOUT_PER_REVIEW, Agent)
+from agent.prompts.review import build_review_agent_prompt
 from common.common import (calculate_performance, cleanup_global_env,
                            combine_labels, format_check, get_gt_labels,
                            get_model_labels, get_model_scores, get_rule_labels,
@@ -36,136 +37,10 @@ class ReviewAgent(Agent):
         llm_engine="gpt-4o",
         timeout=150,
     ) -> None:
-        if (
-            mode == "train-LLM-only"
-            or mode == "train-LLM-only-parallel"
-            or mode == "train-LLM-only-image"
-            or mode == "ablation-detection-only"
-            or mode == "eval-LLM-only"
-        ):
-            review_agent_prompt = f"""
-    You are an AI assistant that reviews Python code changes and propose modifications. You will be given a Python code that contains various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. You will be given a code difference comparing the current code with the previous code. You will also be given the performance metrics of the current code and the previous code. Our goal is make sure that the performance metric of the current code is at least the same as the previous code. If you find regression in the performance metric, you should propose modifications based on the current code and code difference to revert changes. Remember, in the worst case, you can revert all changes to the previous code so that performance metric is at least the same as the previous code.
-    You should achieve the task in the following steps:
-
-    1. You are given a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (x, 2) as input, where each row is a tuple of (value, index). The function will determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. The function will return the labels as an np.ndarray of shape (x), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. The code will be given in the following format:
-    ##### CODE
-    ```python
-    # import necessary libraries
-    def inference(sample: np.ndarray) -> np.ndarray:
-        # Comment to describe how normal data behave
-        # Normal Rule 1
-        # Normal Rule 2
-        # Code to detect if the given sample is abnormal
-        # Abnormal Rule 1
-        if ...
-        # Abnormal Rule 2
-        if ...
-        # return labels as a 1d numpy array indicating abnormal/normal of each index
-    ```
-    2. You will be given the code difference in the following format:
-    ##### CODE DIFFERENCE
-    start_prev,end_prev,operation,start_curr,end_curr
-    < Lines from the previous code snippet
-    ---
-    > Lines from the current code snippet
-    ...
-    3. You will be given the performance metrics of the current code and the previous code in the following format:
-    ##### PERFORMANCE METRICS
-    f1_score (diff with performance from previous code),precision (diff with performance from previous code),recall (diff with performance from previous code)
-    4. IMPORTANT: You should output the fixed code following the same format as the input code and as a Python function with name `inference`. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your fixed code for only once, don't use them for any other purpose.
-
-            """.strip()
-        elif mode == "train-evolution":
-            review_agent_prompt = f"""You are an AI assistant that reviews Python code changes and proposes modifications to maintain or improve performance. You will be provided with:  
-
-1. **The current Python code** – a function named `inference(sample: np.ndarray) -> np.ndarray` that classifies data as normal (0) or abnormal (1) based on predefined rules. The function analyzes input samples shaped `(x, 2)`, where each row contains `(value, index)`, and applies pattern-matching logic to determine abnormal patterns. The outline of the code is as follows:
-##### CODE
-    ```python
-    # import necessary libraries
-    def inference(sample: np.ndarray) -> np.ndarray:
-        # Comment to describe how normal data behave
-        # Normal Rule 1
-        # Normal Rule 2
-        # Code to detect if the given sample is abnormal
-        # Abnormal Rule 1
-        if ...
-        # Abnormal Rule 2
-        if ...
-        # return labels as a 1d numpy array indicating abnormal/normal of each index
-    ```
-2. **A code difference (diff)** – highlighting modifications between the previous and current versions of `inference`.  Given in the following format:
-##### CODE DIFFERENCE
-    start_prev,end_prev,operation,start_curr,end_curr
-    < Lines from the previous code snippet
-    ---
-    > Lines from the current code snippet
-    ...
-3. **Performance metrics** – showing the `f1_score`, `precision`, and `recall` of the current code compared to the previous version, along with the differences in these metrics.  
-4. IMPORTANT: You should output the fixed code following the same format as the input code and as a Python function with name `inference`. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your fixed code for only once, don't use them for any other purpose.
-
-### **Your Goal:**
-- Ensure that the performance metrics of the current code will increase after implemeting suggested modification.  
-- If there is a regression in any metric, propose modifications **based on the current code and the provided code difference**.  
-- **Do not revert the code under any circumstance.** Instead, modify the current version to match or exceed the previous performance while preserving meaningful improvements.  
-
-### **Instructions:**  
-1. Analyze the current `inference` function and identify any issues in rule logic that may have caused performance regression.  
-2. Examine the code difference and understand how recent changes impacted the classification behavior.  
-3. Suggest modifications that refine the current rules to restore or enhance performance while preserving meaningful improvements.  
-4. If necessary, adjust conditions, thresholds, or patterns in the abnormal/normal rule logic to balance precision and recall.  
-5. **Output only the modified `inference` function in Python syntax, wrapped in triple backticks (```python ... ```), ensuring correct formatting.** Do not provide explanations or additional text.
-6. Don't fully revert the code to the previous version; instead, propose targeted modifications to improve performance (you can still revert specific changes if needed).
-            """.strip()
-        elif mode == "train-combined-fp" or mode == "train-combined-fn":
-            review_agent_prompt = f"""
-    You are an AI assistant that reviews Python code changes and propose modifications. You will be given a Python code that contains various anomaly detection rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The rules in this Python code will be used in combination with a deep learning model that performs anomaly detection. Both the rules and the deep learning model will generate anomaly labels, and the performance is a combination of anomaly labels from both sides, comparing against the grount-truth labels.
-
-    The review process depends on the stage of rule generation.
-
-    If previous code does not exist, that means we are at the first ieration for the rules. You will be given the current code for the rules. You will also be given the performance metrics of the current code combined with the deep learning model and the baseline performance from running only the deep learning model. Our goal is make sure that the performance metrics of the current code combined with the deep learning model is better than the previous code. If you find regression in the performance metric, you should propose modifications based on the current code and code difference to revert changes. 
-
-    If previous code exists, that means we are iterating over the rules. You will be given a code difference comparing the current code with the previous code. You will also be given the performance metrics of the current code and the previous code. Our goal is make sure that the performance metric of the current code is better than the previous code. If you find regression in the performance metric, you should propose modifications based on the current code and code difference to revert changes. 
-
-    You should achieve the task in the following steps:
-
-    1. You are given a python function `inference(sample: np.ndarray) -> labels: np.ndarray` to write various rules to describe and remember the pattern of given negative/abnormal samples and exclude all given positive/normal samples. The function will take a sample of numpy array with shape (x, 2) as input, where each row is a tuple of (value, index). The function will determine whether the given sample has a similar pattern as previous negative/abnormal or positive/normal samples. The function will return the labels as an np.ndarray of shape (x), and for each index, value=1 means the data of the index is abnormal, and value=0 means the data of the index is normal. The code will be given in the following format:
-    ##### CODE
-    ```python
-    # import necessary libraries
-    def inference(sample: np.ndarray) -> np.ndarray:
-        # Comment to describe how normal data behave
-        # Normal Rule 1
-        # Normal Rule 2
-        # Code to detect if the given sample is abnormal
-        # Abnormal Rule 1
-        if ...
-        # Abnormal Rule 2
-        if ...
-        # return labels as a 1d numpy array indicating abnormal/normal of each index
-    ```
-    2. You will be given the code difference in the following format, if previous code exists
-    ##### CODE DIFFERENCE
-    start_prev,end_prev,operation,start_curr,end_curr
-    < Lines from the previous code snippet
-    ---
-    > Lines from the current code snippet
-    ...
-    3. You will be given the performance metrics of the current code and either the baseline performance or performance from the previous code in the following format:
-    ##### PERFORMANCE METRICS
-    f1_score (diff with performance from baseline performance),precision (diff with performance from baseline performance),recall (diff with performance from baseline performance)
-
-    or 
-
-    ##### PERFORMANCE METRICS
-    f1_score (diff with performance from previous code),precision (diff with performance from previous code),recall (diff with performance from previous code)
-    4. IMPORTANT: You should output the fixed code following the same format as the input code and as a Python function with name `inference`. You should wrap the code with ```python as the first line and ``` as the last line. You must only use ```python and ``` to wrap your fixed code for only once, don't use them for any other purpose.
-
-            """.strip()
-        else:
-            raise ValueError(f"Unsupported mode: {mode}")
+        review_agent_prompt = build_review_agent_prompt(mode)
 
         self.LLM = LLM(
-            system_prompt=review_agent_prompt.strip(),
+            system_prompt=review_agent_prompt,
             temperature=0.75,
             past_message_num=10,
             engine=llm_engine,

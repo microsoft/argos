@@ -12,6 +12,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 
 from agent.agent import (LLM, TIMEOUT, TIMEOUT_FIRST_REVIEW, TIMEOUT_INFERENCE,
                          Agent)
+from agent.prompts.llmad import LLMAD_PROMPT
 from common.common import (calculate_performance, combine_labels, format_check,
                            get_gt_labels, get_model_labels, get_model_scores,
                            get_rule_labels, preprocess_labels,
@@ -27,42 +28,7 @@ class LLMAD(Agent):
     def __init__(self, chunk_size, mode="baseline-LLMAD", llm_engine="gpt-4o") -> None:
         self.chunk_size = chunk_size
         if mode == "baseline-LLMAD":
-            llmad_prompt = """
-##Instructions 
-Determine if there are any anomalies in the provided AIOPS flow data sequence. ##Following Rules: 
-1. A data point is considered an anomaly if it is part of a sequence of at least one consecutive anomalous points or continues to plummet or surge abruptly.
-2. Given that the vast majority of data points are expected to be no anomaly, Anomalies are exceedingly rare and should only be identified with absolute certainty. 
-3. Normal data may exhibit volatility, which should not be mistaken for anomalies. 
-4. Mislabeling normal data as an anomaly can lead to catastrophic failures. Exercise extreme caution. False positives are unacceptable. 
-5. If do not have 100 percent confidence that data is an anomaly, do not flag it as an anomaly. 
-6. The output of anomaly intervals needs to be accurately located and should not be excessively long. 
-7. anomaly_type should be one of the following: 
-- PersistentLevelShiftUp: The data shifts to a higher value and maintains that level consistently, do not return to the original baseline. like 1 2 1 2 1 2 *500* *480* *510* *500* *500* 
-- PersistentLevelShiftDown: The data shifts to a lower value and maintains that level consistently, do not return to the original baseline. like 1 2 1 2 *-100* *-102* *-104* *-110* *-110* 
-- TransientLevelShiftUp: The data temporarily shifts to a higher value and then returning to the original baseline, the anomaly maintains for at least 5 data points and return to baseline like 1 2 1 2 1 2 *500* *500* *499* *510* *500* 1 2 1 2 
-- TransientLevelShiftDown: The data temporarily shifts to a lower value and then returning to the original baseline, the anomaly maintains for at least 5 data points return to baseline like 1 2 1 2 *-100* *-102* *-104* *-110* *-100* 1 2 1 2 
-- SingleSpike: A brief, sharp rise in data value followed by an immediate return to the baseline. like 1 2 1 2 1 2 *200* *500* 1 2 
-- SingleDip: A brief, sharp drop in data value followed by an immediate return to the baseline. like 1 2 1 2 *-500* *-200* 1 2 1 2 
-- MultipleSpikes: Several brief, sharp rises in data value, each followed by a return to the baseline. like 1 2 *500* 3 2 *510* *200* 1 2 *480* 1 2 
-- MultipleDips: Several brief, sharp drops in data value, each followed by a return to the baseline. like 1 2 *-100* 3 2 *-110* *-200* 1 2 *-120* 1 2 
-8. alarm_level should be one of the following: 
-- Urgent/Error: This category is for values that represent a severe risk, potentially causing immediate damage or harm across all event types whether increases, decreases, spikes, dips, or multiple occurrences. 
-- Important: Allocated for moderate value changes (both increases and decreases) that could escalate to future problems or system stress but are not immediately hazardous. This also covers upward transient level shifts that concern system longevity and potential failure indications from downward shifts. 
-- Warning: Used for noticeable deviations from the norm that are not yet critical but merit close monitoring. This includes single spikes and dips that are moderate in nature, as well as multiple non-critical spikes and level shifts that are significant but not yet dangerous. 
-9. The briefExplanation must comprise a explicit three-step analysis utilizing precise data (do not only repeat the rule): 
-- Step 1: Assess the overall trend to ascertain if it aligns with expected patterns, thereby identifying any overarching anomalies. 
-- Step 2: Examine the local data segments to detect any specific deviations or anomalies. 
-- Step 3: Reassess the identified points to confirm their anomalous nature, given the rarity of true anomalies. 
-This step ensures that the detected points are not merely normal fluctuations or seasonal variations. 
-10. Provide responses in a strict JSON format suitable for direct parsing, without any additional textual commentary. 
-## Data Format
-1. You will be given the data sample in following format:
-##### DATA
-    <multiple known data samples, each sample contains continuous samples, each sample is a tuple of (value, index)>
-
-##Response Format 
-{ "briefExplanation": {"step1_global": analysis reason, "step2_local": analysis reason, "step3_reassess": analysis reason}, "is_anomaly": false/true, "anomalies": []/[index1, index2, index3, ...], "reason_for_anomaly_type": "no"/"reason for anomaly type", "anomaly_type": "no"/"classification of main anomaly",(only one) "reason_for_alarm_level": "no"/"reason for alarm level", "alarm_level": "no"/"Urgent/Error"/"Important"/"Warning",(only one) }       
-            """
+            llmad_prompt = LLMAD_PROMPT
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 
