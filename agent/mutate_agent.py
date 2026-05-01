@@ -30,14 +30,6 @@ Example mutate rule:
 - add noise to sample from a distribution
 """
 
-# probaility_mutate_rules={
-#     "remove(s)": 0.05, # remove rule (otherwise llm just keep adding rule) 0.05
-#     "free": 0.79, # free to mutate -> default                              0.84
-#     "same": 0.0, # keep the same                                          0.8
-#     "change-only": 0.15, # change the rule                                0.99
-#     "remove-all-but-one": 0.01 # remove all but one rule                  1.0  
-# }
-
 probaility_mutate_rules={
     "remove(s)": 0.30, # remove rule (otherwise llm just keep adding rule) 0.05
     "free": 0.30, # free to mutate -> default                              0.84
