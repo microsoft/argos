@@ -7,7 +7,7 @@ contourpy==1.2.1
 cycler==0.12.1
 distro==1.9.0
 exceptiongroup==1.2.1
-fonttools==4.53.0
+fonttools==4.60.2
 h11==0.16.0
 httpcore==1.0.5
 httpx==0.27.0
