@@ -20,7 +20,7 @@ openai==1.35.9
 packaging==24.1
 pandas==2.2.2
 patsy==0.5.6
-pillow==10.4.0
+pillow==12.2.0
 pydantic==2.8.0
 pydantic_core==2.20.0
 pyparsing==3.1.2
